@@ -19,11 +19,13 @@
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
+#include "lwip/udp.h"
 
 namespace candy {
 
 class Client;
 class SessionTcp;
+class SessionUdp;
 
 // NetStack：独占 lwIP（NO_SYS=1 单线程 raw API）的模块。
 // 持有一个 NetStack 线程驱动 lwIP 收发与定时器，一个 Reactor 线程管理落地 fd。
@@ -43,12 +45,16 @@ public:
     // 供 Session 使用：在 NetStack 线程内执行任务（保证 lwIP API 线程安全）。
     void postToStack(std::function<void()> task);
     Reactor &getReactor();
+    // UDP 回包注入用：拿到本模块的 lwIP netif（仅 NetStack 线程使用）。
+    struct netif &getNetif();
 
     // 回包：lwIP netif->output 产生的 IP 包，按连接上下文重新 IPIP 封装送回源端。
     void output(const std::string &innerPacket);
 
     // Session 结束时从会话表移除。
     void removeSession(struct tcp_pcb *pcb);
+    // UDP 伪会话结束时从 UDP 会话表移除（按四元组 key）。仅 NetStack 线程调用。
+    void removeUdpSession(const std::string &key);
 
     Client *getClient();
 
@@ -58,15 +64,20 @@ private:
     void loop();
     void handleInput(std::string packet);
     void feedToLwip(const std::string &innerPacket, IP4 vnetPeer);
+    // UDP 伪会话空闲超时回收（仅 NetStack 线程，loop 中节流调用）。
+    void reapIdleUdpSessions();
 
     // lwIP 回调跳板
     static err_t netifInitTrampoline(struct netif *netif);
     static err_t outputTrampoline(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr);
     static err_t acceptTrampoline(void *arg, struct tcp_pcb *newpcb, err_t err);
+    static void udpRecvTrampoline(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port);
 
     err_t onNetifInit(struct netif *netif);
     err_t onOutput(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr);
     err_t onAccept(struct tcp_pcb *newpcb, err_t err);
+    // UDP 数据报到达：addr/port=源端(dev1)，pcb->local=目的(落地服务)。仅 NetStack 线程。
+    void onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port);
 
 private:
     Client *client;
@@ -76,6 +87,8 @@ private:
 
     struct netif lwipNetif;
     struct tcp_pcb *listenPcb;
+    // UDP 捕获所有目的的伪监听 pcb（绑定 netif、bind(NULL,0)，收首包克隆出 connect 的 npcb）。
+    struct udp_pcb *udpListenPcb;
 
     Reactor reactor;
 
@@ -95,6 +108,8 @@ private:
 
     std::mutex sessionMutex;
     std::unordered_map<struct tcp_pcb *, std::shared_ptr<SessionTcp>> sessions;
+    // UDP 伪会话表：四元组 key -> SessionUdp。仅 NetStack 线程访问，无需加锁。
+    std::unordered_map<std::string, std::shared_ptr<SessionUdp>> udpSessions;
 };
 
 } // namespace candy
