@@ -200,13 +200,14 @@ Client &Tun::getClient() {
     return *this->client;
 }
 
-// 仅跟踪 TCP（阶段一）。返回是否成功解析出五元组。
+// 跟踪 TCP(0x06)/UDP(0x11) 发起流。返回是否成功解析出五元组。
+// TCP 与 UDP 的 L4 头前 4 字节都是 (源端口, 目的端口)，端口提取逻辑一致。
 static bool parseFlow(const std::string &inner, FlowKey &key) {
     if (inner.size() < sizeof(IP4Header)) {
         return false;
     }
     const IP4Header *ip = (const IP4Header *)inner.data();
-    if (ip->protocol != 0x06) { // TCP
+    if (ip->protocol != 0x06 && ip->protocol != 0x11) { // TCP / UDP
         return false;
     }
     size_t ihl = (ip->version_ihl & 0x0f) * 4;

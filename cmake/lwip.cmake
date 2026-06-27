@@ -13,6 +13,18 @@ if(NOT lwip_POPULATED)
     FetchContent_Populate(lwip)
 endif()
 
+# 补丁：heiher lwIP 的 UDP PRETEND 克隆路径用了 pcb->local_ip.type，
+# 该字段仅在双栈(LWIP_IPV6=1)的 ip_addr_t 存在；本项目是 IPv4-only，
+# 编译会报 "ip_addr_t has no member named type"。改用版本无关的
+# IP_GET_TYPE() 宏（IPv4-only 下展开为 IPADDR_TYPE_V4），不引入 IPv6。
+set(LWIP_UDP_C "${lwip_SOURCE_DIR}/src/core/udp.c")
+file(READ "${LWIP_UDP_C}" _lwip_udp_src)
+string(REPLACE
+    "udp_new_ip_type(pcb->local_ip.type)"
+    "udp_new_ip_type(IP_GET_TYPE(&pcb->local_ip))"
+    _lwip_udp_src "${_lwip_udp_src}")
+file(WRITE "${LWIP_UDP_C}" "${_lwip_udp_src}")
+
 set(LWIP_SRC_DIR ${lwip_SOURCE_DIR}/src)
 set(LWIP_PORT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/candy/src/netstack/lwip-port)
 set(LWIP_OPTS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/candy/src/netstack)

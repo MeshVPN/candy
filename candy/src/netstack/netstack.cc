@@ -3,6 +3,7 @@
 #include "core/client.h"
 #include "core/message.h"
 #include "netstack/session_tcp.h"
+#include "netstack/session_udp.h"
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -13,11 +14,12 @@
 #include "lwip/priv/tcp_priv.h"
 #include "lwip/tcp.h"
 #include "lwip/timeouts.h"
+#include "lwip/udp.h"
 #include "netif/etharp.h"
 
 namespace candy {
 
-NetStack::NetStack() : client(nullptr), running(false), listenPcb(nullptr) {
+NetStack::NetStack() : client(nullptr), running(false), listenPcb(nullptr), udpListenPcb(nullptr) {
     std::memset(&this->lwipNetif, 0, sizeof(this->lwipNetif));
 }
 
@@ -134,6 +136,21 @@ int NetStack::initStack() {
     }
     tcp_arg(this->listenPcb, this);
     tcp_accept(this->listenPcb, acceptTrampoline);
+
+    // UDP 捕获所有目的：建一个绑定本 netif 的 udp_pcb，bind(NULL,0) 接管任意目的。
+    // 依赖 netif 的 NETIF_FLAG_PRETEND_TCP：收到首个数据报时 lwIP 会克隆出一个
+    // 已 connect 源端的 npcb 并通过回调交给我们，由此建立四元组伪会话。
+    this->udpListenPcb = udp_new_ip_type(IPADDR_TYPE_ANY);
+    if (this->udpListenPcb == nullptr) {
+        spdlog::critical("netstack udp_new failed");
+        return -1;
+    }
+    udp_bind_netif(this->udpListenPcb, &this->lwipNetif);
+    if (udp_bind(this->udpListenPcb, nullptr, 0) != ERR_OK) {
+        spdlog::critical("netstack udp_bind failed");
+        return -1;
+    }
+    udp_recv(this->udpListenPcb, udpRecvTrampoline, this);
     return 0;
 }
 
@@ -149,9 +166,21 @@ void NetStack::teardownStack() {
         }
         this->sessions.clear();
     }
+    // UDP 伪会话仅 NetStack 线程访问，此处即在 NetStack 线程，直接清理。
+    for (auto &kv : this->udpSessions) {
+        if (kv.second) {
+            kv.second->shutdownFromStack();
+        }
+    }
+    this->udpSessions.clear();
     {
         std::unique_lock lock(this->peerMapMutex);
         this->vnetPeerMap.clear();
+    }
+    if (this->udpListenPcb != nullptr) {
+        udp_recv(this->udpListenPcb, nullptr, nullptr);
+        udp_remove(this->udpListenPcb);
+        this->udpListenPcb = nullptr;
     }
     if (this->listenPcb != nullptr) {
         tcp_close(this->listenPcb);
@@ -162,6 +191,7 @@ void NetStack::teardownStack() {
 }
 
 void NetStack::loop() {
+    auto lastReap = std::chrono::steady_clock::now();
     while (this->running.load()) {
         std::function<void()> task;
         {
@@ -177,6 +207,34 @@ void NetStack::loop() {
             task();
         }
         sys_check_timeouts();
+
+        // 节流：每 10s 扫描一次 UDP 伪会话，回收空闲超时项。
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastReap >= std::chrono::seconds(10)) {
+            reapIdleUdpSessions();
+            lastReap = now;
+        }
+    }
+}
+
+void NetStack::reapIdleUdpSessions() {
+    // 仅 NetStack 线程访问 udpSessions，无需加锁。
+    // UDP 无连接：60s 无收发则判定空闲，强制关闭并移除（shutdownFromStack 会
+    // 移除 npcb 并交由 reactor 关闭 fd）。注意 shutdownFromStack 内不修改 udpSessions，
+    // 故可安全地在遍历后统一 erase。
+    auto now = std::chrono::steady_clock::now();
+    int reaped = 0;
+    for (auto it = this->udpSessions.begin(); it != this->udpSessions.end();) {
+        if (it->second && now - it->second->lastActive() > std::chrono::seconds(60)) {
+            it->second->shutdownFromStack();
+            it = this->udpSessions.erase(it);
+            ++reaped;
+        } else {
+            ++it;
+        }
+    }
+    if (reaped > 0) {
+        spdlog::debug("netstack reap idle udp sessions: {} reaped, {} remain", reaped, this->udpSessions.size());
     }
 }
 
@@ -264,6 +322,15 @@ void NetStack::removeSession(struct tcp_pcb *pcb) {
     this->sessions.erase(pcb);
 }
 
+void NetStack::removeUdpSession(const std::string &key) {
+    // 仅 NetStack 线程调用，udpSessions 无需加锁。
+    this->udpSessions.erase(key);
+}
+
+struct netif &NetStack::getNetif() {
+    return this->lwipNetif;
+}
+
 err_t NetStack::netifInitTrampoline(struct netif *netif) {
     NetStack *self = (NetStack *)netif->state;
     return self->onNetifInit(netif);
@@ -277,6 +344,11 @@ err_t NetStack::outputTrampoline(struct netif *netif, struct pbuf *p, const ip4_
 err_t NetStack::acceptTrampoline(void *arg, struct tcp_pcb *newpcb, err_t err) {
     NetStack *self = (NetStack *)arg;
     return self->onAccept(newpcb, err);
+}
+
+void NetStack::udpRecvTrampoline(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    NetStack *self = (NetStack *)arg;
+    self->onUdpRecv(pcb, p, addr, port);
 }
 
 err_t NetStack::onNetifInit(struct netif *netif) {
@@ -318,6 +390,41 @@ err_t NetStack::onAccept(struct tcp_pcb *newpcb, err_t err) {
         this->sessions[newpcb] = session;
     }
     return ERR_OK;
+}
+
+void NetStack::onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    // 首包路径：lwIP 已为该流克隆出已 connect 的 npcb（pcb 参数），
+    //   addr/port = 目的(dev2 服务)，pcb->remote_ip/remote_port = 源端(dev1)。
+    // 我们建立伪会话并在 npcb 上注册每流 recv handler，然后**不释放 p**：
+    //   lwIP 收尾会 goto again 把同一数据报按已连接 npcb 重投，交由每流 handler 处理。
+    if (p == nullptr) {
+        return;
+    }
+    if (!this->running.load()) {
+        udp_remove(pcb);
+        pbuf_free(p);
+        return;
+    }
+
+    IP4 origDst;
+    std::memcpy(&origDst, &ip_2_ip4(addr)->addr, sizeof(uint32_t));
+    uint16_t origDstPort = port;
+    IP4 origSrc;
+    std::memcpy(&origSrc, &ip_2_ip4(&pcb->remote_ip)->addr, sizeof(uint32_t));
+    uint16_t origSrcPort = pcb->remote_port;
+
+    spdlog::debug("netstack onUdpRecv: {}:{} -> {}:{}", origSrc.toString(), origSrcPort, origDst.toString(),
+                  origDstPort);
+
+    auto session = std::make_shared<SessionUdp>(this, pcb, origSrc, origSrcPort, origDst, origDstPort);
+    if (session->start()) {
+        udp_recv(pcb, nullptr, nullptr);
+        udp_remove(pcb);
+        pbuf_free(p);
+        return;
+    }
+    this->udpSessions[session->key()] = session;
+    // 不释放 p：交还 lwIP（goto again 重投到已连接 npcb 的每流 handler）。
 }
 
 } // namespace candy

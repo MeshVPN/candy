@@ -11,7 +11,7 @@
 #define IP_FORWARD 0
 
 #define LWIP_TCP 1
-#define LWIP_UDP 0
+#define LWIP_UDP 1
 #define LWIP_RAW 0
 #define LWIP_ICMP 1
 #define LWIP_DNS 0
@@ -34,6 +34,7 @@
 #define MEMP_NUM_TCP_PCB 4096
 #define MEMP_NUM_TCP_PCB_LISTEN 16
 #define MEMP_NUM_TCP_SEG 4096
+#define MEMP_NUM_UDP_PCB 4096
 #define MEMP_NUM_PBUF 4096
 #define MEMP_NUM_REASSDATA 1
 #define PBUF_POOL_SIZE 0
@@ -50,8 +51,10 @@
 
 #define CHECKSUM_GEN_IP 1
 #define CHECKSUM_GEN_TCP 1
+#define CHECKSUM_GEN_UDP 1
 #define CHECKSUM_CHECK_IP 1
 #define CHECKSUM_CHECK_TCP 1
+#define CHECKSUM_CHECK_UDP 1
 
 #define LWIP_STATS 0
 #define LWIP_STATS_DISPLAY 0
