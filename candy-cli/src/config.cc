@@ -37,6 +37,7 @@ Poco::JSON::Object arguments::json() {
         config.set("port", this->port);
         config.set("vmac", virtualMac(this->name));
         config.set("expt", loadTunAddress(this->name));
+        config.set("forward-mode", this->forwardMode);
     }
 
     if (this->mode == "server") {
@@ -125,6 +126,8 @@ int arguments::parse(int argc, char *argv[]) {
               "If omitted, auto-detected from the first physical network interface. (client only)")
         .metavar("<ip>");
 
+    program.add_argument("--forward-mode").help("packet forward mode: kernel or userspace");
+
     program.add_group("Server options");
 
     program.add_argument("-d", "--dhcp")
@@ -182,6 +185,7 @@ int arguments::parse(int argc, char *argv[]) {
         program.set_if_used("--mtu", this->mtu);
         program.set_if_used("--discovery", this->discovery);
         program.set_if_used("--route", this->routeCost);
+        program.set_if_used("--forward-mode", this->forwardMode);
 
         bool needShowUsage = [&]() {
             if (this->mode != "client" && this->mode != "server")
@@ -239,6 +243,7 @@ void arguments::parseFile(std::string cfgFile) {
             {"port", [&](const std::string &value) { this->port = std::stoi(value); }},
             {"mtu", [&](const std::string &value) { this->mtu = std::stoi(value); }},
             {"localhost", [&](const std::string &value) { this->localhost = value; }},
+            {"forward-mode", [&](const std::string &value) { this->forwardMode = value; }},
         };
         auto trim = [](std::string str) {
             if (str.length() >= 2 && str.front() == '\"' && str.back() == '\"') {

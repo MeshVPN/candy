@@ -31,6 +31,7 @@ private:
     int discovery = 0;
     int routeCost = 0;
     int mtu = 1400;
+    std::string forwardMode = "kernel";
 };
 
 int saveTunAddress(const std::string &name, const std::string &cidr);

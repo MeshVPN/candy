@@ -1,0 +1,7 @@
+#ifndef CANDY_NETSTACK_LWIP_PORT_ARCH_PERF_H
+#define CANDY_NETSTACK_LWIP_PORT_ARCH_PERF_H
+
+#define PERF_START
+#define PERF_STOP(x)
+
+#endif

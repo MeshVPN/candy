@@ -86,6 +86,8 @@ endif()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/lwip.cmake)
+
 add_subdirectory(candy)
 add_subdirectory(candy-cli)
 add_subdirectory(candy-service)
