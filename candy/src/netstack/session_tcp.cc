@@ -109,15 +109,24 @@ err_t SessionTcp::onRecv(struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
     std::string data;
     data.resize(p->tot_len);
     pbuf_copy_partial(p, data.data(), p->tot_len, 0);
+    u16_t recvLen = p->tot_len;
     pbuf_free(p);
 
+    size_t bufSize;
     {
         std::unique_lock lock(this->bufMutex);
         this->forwardBuf.append(data);
+        bufSize = this->forwardBuf.size();
     }
     // 注意：不在此处 tcp_recved！接收窗口的推进延迟到数据真正写进落地 fd 之后
     // （flushForwardLocked 累加 pendingRecved -> NetStack 线程 ackRecvedToLwip）。
     // 否则会向源端谎报"已收下"，落地端写得慢时 forwardBuf 无界膨胀直至 OOM。
+
+    // 背压埋点(lwIP->fd)：记录本次收量、forwardBuf 积压、当前未确认窗口(pendingRecved)。
+    // forwardBuf 应稳定在一个 TCP_WND 内；若持续增长说明落地端写不动、背压失效。
+    spdlog::debug("[bp][fwd] onRecv {} -> {}:{} recv={} forwardBuf={} pendingRecved={} sndwnd={}",
+                  this->origSrc.toString(), this->origDst.toString(), this->origDstPort, recvLen, bufSize,
+                  this->pendingRecved.load(), (this->pcb ? tcp_sndbuf(this->pcb) : 0));
 
     auto holder = shared_from_this();
     this->stack->getReactor().post([holder] { holder->flushForwardLocked(); });
@@ -131,8 +140,15 @@ err_t SessionTcp::onSent(struct tcp_pcb *pcb, u16_t len) {
 }
 
 void SessionTcp::onErr(err_t err) {
-    // pcb 已被 lwIP 释放
+    // pcb 已被 lwIP 释放（RST/abort 路径，不会再有 onRecv(p==null) 走正常关闭）。
+    // 必须在此显式从会话表移除：否则 sessions[pcb] 仍持有一份 shared_ptr，
+    // 而 closeFromReactor 因 pcb 已空不会触发 closeFromStack -> removeSession，
+    // 导致 SessionTcp（连同 forwardBuf/backwardBuf）泄漏至下次重连 teardown。
+    struct tcp_pcb *deadPcb = this->pcb;
     this->pcb = nullptr;
+    if (deadPcb != nullptr) {
+        this->stack->removeSession(deadPcb);
+    }
     closeFromReactor();
 }
 
@@ -221,6 +237,9 @@ void SessionTcp::updateReadInterest() {
     // 如此 fd 读取速率被 lwIP 发送+ACK 回收节奏严格约束，不再淹没单线程 NetStack。
     if (this->readPaused.load() && this->backwardBytes.load() <= LOW_WATER) {
         this->readPaused.store(false);
+        // 背压埋点(fd->lwIP)：积压回落到低水位，恢复读取（水位下降沿，低频事件）。
+        spdlog::debug("[bp][bwd] resume read {}:{} -> {} backwardBytes={} (<=LOW_WATER={})", this->origDst.toString(),
+                      this->origDstPort, this->origSrc.toString(), this->backwardBytes.load(), LOW_WATER);
         int fd = this->fd;
         auto holder = shared_from_this();
         this->stack->getReactor().post([holder, fd] {
@@ -323,6 +342,8 @@ void SessionTcp::flushForwardLocked() {
         return;
     }
     size_t acked = 0;
+    size_t remain = 0;
+    bool blocked = false;
     {
         std::unique_lock lock(this->bufMutex);
         while (!this->forwardBuf.empty()) {
@@ -335,6 +356,7 @@ void SessionTcp::flushForwardLocked() {
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 this->wantWrite = true;
                 this->stack->getReactor().mod(this->fd, ReactorEvent::READ | ReactorEvent::WRITE);
+                blocked = true;
                 break;
             }
             lock.unlock();
@@ -345,7 +367,14 @@ void SessionTcp::flushForwardLocked() {
             this->wantWrite = false;
             this->stack->getReactor().mod(this->fd, ReactorEvent::READ);
         }
+        remain = this->forwardBuf.size();
     }
+    // 背压埋点(lwIP->fd)：记录本次写进落地 fd 的字节、剩余积压、是否因 fd 写满而背压。
+    // blocked=true 表示落地端写满(EAGAIN)，forwardBuf 残留并等待 onFdWritable 续写；
+    // 此时不向 lwIP 确认残留部分，源端接收窗口收紧 -> 自动减速，这正是背压生效的体现。
+    spdlog::debug("[bp][fwd] flush {} -> {}:{} wrote={} remain={} blocked={} pendingRecved->{}",
+                  this->origSrc.toString(), this->origDst.toString(), this->origDstPort, acked, remain, blocked,
+                  this->pendingRecved.load() + acked);
     // 已落地的字节交由 NetStack 线程向 lwIP 确认（推进接收窗口）。
     // 这才是真正的"收到"，从而把源端发送速率约束在落地 fd 的消费能力之内。
     if (acked > 0) {
@@ -368,6 +397,10 @@ void SessionTcp::onFdReadable() {
         // 恢复由 NetStack 线程在 pumpToLwip（onSent 驱动）排空到低水位后触发。
         if (this->backwardBytes.load() >= HIGH_WATER) {
             this->readPaused.store(true);
+            // 背压埋点(fd->lwIP)：积压达到高水位，停止读取（水位上升沿，低频事件）。
+            spdlog::debug("[bp][bwd] pause read {}:{} -> {} backwardBytes={} (>=HIGH_WATER={})",
+                          this->origDst.toString(), this->origDstPort, this->origSrc.toString(),
+                          this->backwardBytes.load(), HIGH_WATER);
             this->stack->getReactor().mod(this->fd, ReactorEvent::NONE);
             return;
         }
