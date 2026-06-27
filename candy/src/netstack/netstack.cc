@@ -2,6 +2,7 @@
 #include "netstack/netstack.h"
 #include "core/client.h"
 #include "core/message.h"
+#include "netstack/session_icmp.h"
 #include "netstack/session_tcp.h"
 #include "netstack/session_udp.h"
 #include <chrono>
@@ -173,6 +174,13 @@ void NetStack::teardownStack() {
         }
     }
     this->udpSessions.clear();
+    // ICMP 伪会话同理清理。
+    for (auto &kv : this->icmpSessions) {
+        if (kv.second) {
+            kv.second->shutdownFromStack();
+        }
+    }
+    this->icmpSessions.clear();
     {
         std::unique_lock lock(this->peerMapMutex);
         this->vnetPeerMap.clear();
@@ -208,10 +216,11 @@ void NetStack::loop() {
         }
         sys_check_timeouts();
 
-        // 节流：每 10s 扫描一次 UDP 伪会话，回收空闲超时项。
+        // 节流：每 10s 扫描一次 UDP/ICMP 伪会话，回收空闲超时项。
         auto now = std::chrono::steady_clock::now();
         if (now - lastReap >= std::chrono::seconds(10)) {
             reapIdleUdpSessions();
+            reapIdleIcmpSessions();
             lastReap = now;
         }
     }
@@ -238,6 +247,27 @@ void NetStack::reapIdleUdpSessions() {
     }
 }
 
+void NetStack::reapIdleIcmpSessions() {
+    // 仅 NetStack 线程访问 icmpSessions，无需加锁。
+    // ICMP echo 间隔通常 1s：30s 无活动判定空闲，强制关闭并移除。
+    // shutdownFromStack 仅置 closing 并交 reactor 关 fd，不修改 icmpSessions，
+    // 故可安全地在遍历后统一 erase。
+    auto now = std::chrono::steady_clock::now();
+    int reaped = 0;
+    for (auto it = this->icmpSessions.begin(); it != this->icmpSessions.end();) {
+        if (it->second && now - it->second->lastActive() > std::chrono::seconds(30)) {
+            it->second->shutdownFromStack();
+            it = this->icmpSessions.erase(it);
+            ++reaped;
+        } else {
+            ++it;
+        }
+    }
+    if (reaped > 0) {
+        spdlog::debug("netstack reap idle icmp sessions: {} reaped, {} remain", reaped, this->icmpSessions.size());
+    }
+}
+
 void NetStack::handleInput(std::string packet) {
     if (packet.size() < sizeof(IP4Header)) {
         return;
@@ -254,6 +284,12 @@ void NetStack::handleInput(std::string packet) {
     IP4Header *inner = (IP4Header *)packet.data();
     spdlog::debug("netstack input: vnetPeer={} {} -> {} proto={}", vnetPeer.toString(), inner->saddr.toString(),
                   inner->daddr.toString(), (int)inner->protocol);
+    // ICMP 不走 lwIP（PRETEND netif 仅接受 TCP/UDP），在入栈前拦截并独立落地。
+    if (inner->protocol == 0x01) {
+        if (handleIcmp(packet, vnetPeer)) {
+            return;
+        }
+    }
     feedToLwip(packet, vnetPeer);
 }
 
@@ -286,6 +322,56 @@ void NetStack::feedToLwip(const std::string &innerPacket, IP4 vnetPeer) {
         spdlog::warn("netstack netif.input failed: {}", (int)e);
         pbuf_free(p);
     }
+}
+
+bool NetStack::handleIcmp(const std::string &innerPacket, IP4 vnetPeer) {
+    // 仅处理 ICMP echo request(type 8)：建立/复用伪会话，用内核 ICMP socket 落地。
+    // 其余 ICMP（差错类等）暂不处理，返回 false 交回默认丢弃（不喂 lwIP）。
+    IP4Header *ip = (IP4Header *)innerPacket.data();
+    size_t ihl = (ip->version_ihl & 0x0f) * 4;
+    if (innerPacket.size() < ihl + 8) {
+        return false;
+    }
+    const uint8_t *icmp = (const uint8_t *)innerPacket.data() + ihl;
+    uint8_t type = icmp[0];
+    if (type != 8) { // 仅 echo request
+        return false;
+    }
+    uint16_t icmpId = ((uint16_t)icmp[4] << 8) | icmp[5];
+
+    IP4 origSrc = ip->saddr;
+    IP4 origDst = ip->daddr;
+
+    // 记录回包寻址：origSrc(dev1) -> vnetPeer(源网关虚拟IP)，供 reply 经 output 回送。
+    if (!vnetPeer.empty()) {
+        auto now = std::chrono::steady_clock::now();
+        std::unique_lock lock(this->peerMapMutex);
+        this->vnetPeerMap[uint32_t(origSrc)] = PeerEntry{vnetPeer, now};
+    }
+
+    // key：(源,目的,icmpId)。复用已有会话或新建。
+    std::string key;
+    key.assign((const char *)&origSrc, sizeof(uint32_t));
+    key.append((const char *)&origDst, sizeof(uint32_t));
+    key.append((const char *)&icmpId, sizeof(icmpId));
+
+    std::shared_ptr<SessionIcmp> session;
+    auto sit = this->icmpSessions.find(key);
+    if (sit != this->icmpSessions.end()) {
+        session = sit->second;
+    } else {
+        session = std::make_shared<SessionIcmp>(this, origSrc, origDst, icmpId);
+        if (session->start()) {
+            spdlog::debug("netstack icmp session start failed: {} -> {}", origSrc.toString(), origDst.toString());
+            return true; // 已消费（落地失败也不喂 lwIP）
+        }
+        this->icmpSessions[key] = session;
+    }
+
+    spdlog::debug("netstack handleIcmp: {} -> {} id={}", origSrc.toString(), origDst.toString(), icmpId);
+    // 把完整 ICMP 报文（含头与 payload）交给会话落地发送。
+    session->sendEcho(innerPacket.substr(ihl));
+    return true;
 }
 
 void NetStack::output(const std::string &innerPacket) {
@@ -325,6 +411,11 @@ void NetStack::removeSession(struct tcp_pcb *pcb) {
 void NetStack::removeUdpSession(const std::string &key) {
     // 仅 NetStack 线程调用，udpSessions 无需加锁。
     this->udpSessions.erase(key);
+}
+
+void NetStack::removeIcmpSession(const std::string &key) {
+    // 仅 NetStack 线程调用，icmpSessions 无需加锁。
+    this->icmpSessions.erase(key);
 }
 
 struct netif &NetStack::getNetif() {

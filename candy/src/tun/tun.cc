@@ -197,14 +197,16 @@ Client &Tun::getClient() {
     return *this->client;
 }
 
-// 跟踪 TCP(0x06)/UDP(0x11) 发起流。返回是否成功解析出五元组。
+// 跟踪 TCP(0x06)/UDP(0x11)/ICMP(0x01) 发起流。返回是否成功解析出 key。
 // TCP 与 UDP 的 L4 头前 4 字节都是 (源端口, 目的端口)，端口提取逻辑一致。
+// ICMP 无端口：用 echo 的 id 同时充当 sport/dport，使"请求(type 8)"与
+// "应答(type 0)"在五元组反转后能配对（id 不变，src/dst 互换即对应）。
 static bool parseFlow(const std::string &inner, FlowKey &key) {
     if (inner.size() < sizeof(IP4Header)) {
         return false;
     }
     const IP4Header *ip = (const IP4Header *)inner.data();
-    if (ip->protocol != 0x06 && ip->protocol != 0x11) { // TCP / UDP
+    if (ip->protocol != 0x06 && ip->protocol != 0x11 && ip->protocol != 0x01) { // TCP / UDP / ICMP
         return false;
     }
     size_t ihl = (ip->version_ihl & 0x0f) * 4;
@@ -212,6 +214,23 @@ static bool parseFlow(const std::string &inner, FlowKey &key) {
         return false;
     }
     const uint8_t *l4 = (const uint8_t *)inner.data() + ihl;
+    if (ip->protocol == 0x01) {
+        // ICMP：仅跟踪 echo request(8) / echo reply(0)，其余不跟踪。
+        uint8_t type = l4[0];
+        if (type != 8 && type != 0) {
+            return false;
+        }
+        if (inner.size() < ihl + 6) {
+            return false;
+        }
+        uint16_t id = ((uint16_t)l4[4] << 8) | l4[5];
+        key.src = uint32_t(ip->saddr);
+        key.dst = uint32_t(ip->daddr);
+        key.sport = id;
+        key.dport = id;
+        key.proto = ip->protocol;
+        return true;
+    }
     key.src = uint32_t(ip->saddr);
     key.dst = uint32_t(ip->daddr);
     key.sport = ((uint16_t)l4[0] << 8) | l4[1];

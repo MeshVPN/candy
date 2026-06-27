@@ -26,6 +26,7 @@ namespace candy {
 class Client;
 class SessionTcp;
 class SessionUdp;
+class SessionIcmp;
 
 // NetStack：独占 lwIP（NO_SYS=1 单线程 raw API）的模块。
 // 持有一个 NetStack 线程驱动 lwIP 收发与定时器，一个 Reactor 线程管理落地 fd。
@@ -55,6 +56,8 @@ public:
     void removeSession(struct tcp_pcb *pcb);
     // UDP 伪会话结束时从 UDP 会话表移除（按四元组 key）。仅 NetStack 线程调用。
     void removeUdpSession(const std::string &key);
+    // ICMP 伪会话结束时从 ICMP 会话表移除（按 key）。仅 NetStack 线程调用。
+    void removeIcmpSession(const std::string &key);
 
     Client *getClient();
 
@@ -64,8 +67,13 @@ private:
     void loop();
     void handleInput(std::string packet);
     void feedToLwip(const std::string &innerPacket, IP4 vnetPeer);
+    // ICMP echo 在入栈前拦截：lwIP 的 PRETEND netif 只接受 TCP/UDP，ICMP 单独落地。
+    // 返回 true 表示已被 ICMP 处理（不再喂 lwIP）。仅 NetStack 线程。
+    bool handleIcmp(const std::string &innerPacket, IP4 vnetPeer);
     // UDP 伪会话空闲超时回收（仅 NetStack 线程，loop 中节流调用）。
     void reapIdleUdpSessions();
+    // ICMP 伪会话空闲超时回收（仅 NetStack 线程，loop 中节流调用）。
+    void reapIdleIcmpSessions();
 
     // lwIP 回调跳板
     static err_t netifInitTrampoline(struct netif *netif);
@@ -110,6 +118,8 @@ private:
     std::unordered_map<struct tcp_pcb *, std::shared_ptr<SessionTcp>> sessions;
     // UDP 伪会话表：四元组 key -> SessionUdp。仅 NetStack 线程访问，无需加锁。
     std::unordered_map<std::string, std::shared_ptr<SessionUdp>> udpSessions;
+    // ICMP 伪会话表：(源,目的,icmpId) key -> SessionIcmp。仅 NetStack 线程访问，无需加锁。
+    std::unordered_map<std::string, std::shared_ptr<SessionIcmp>> icmpSessions;
 };
 
 } // namespace candy
