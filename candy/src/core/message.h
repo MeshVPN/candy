@@ -16,6 +16,7 @@ enum class MsgKind {
     TRYP2P,
     PUBINFO,
     DISCOVERY,
+    NETSTACK_RX,
 };
 
 struct Msg {
