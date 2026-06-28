@@ -4,6 +4,7 @@
 
 #include "core/net.h"
 #include "netstack/session.h"
+#include "netstack/tcp_handshake.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -58,6 +59,13 @@ private:
     void onFdWritable();
     void closeFromReactor();
 
+    // 握手阶段（仅当 outbound 提供了 handshake 时，连接成功后进入；direct 无握手不进入）。
+    // 在 Reactor 线程驱动：把待发字节写出、把收到字节喂入握手器，完成后切到 splice。
+    void onHandshakeReadable();
+    void onHandshakeWritable();
+    void flushHandshakeOutbound();
+    void finishHandshake();
+
     void flushForwardLocked();
     void updateReadInterest();
 
@@ -65,6 +73,13 @@ private:
     struct tcp_pcb *pcb;
     int fd;
     bool connected;
+
+    // 应用层握手器（仅 socks5 等需要握手的 outbound 非空；direct 为 nullptr）。
+    // 非空时连接成功后先在 Reactor 线程驱动握手，handshake->done() 后置空并进入 splice。
+    // 仅 Reactor 线程访问。
+    std::unique_ptr<TcpHandshake> handshake;
+    // 握手待发字节中尚未写完的残留（非阻塞 write 部分写时保留续发）。仅 Reactor 线程访问。
+    std::string handshakeOutbox;
 
     IP4 origDst;
     uint16_t origDstPort;

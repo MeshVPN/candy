@@ -9,6 +9,8 @@
 #include <cstring>
 #include <mutex>
 #include <spdlog/spdlog.h>
+#include <sstream>
+#include <vector>
 
 #include "lwip/init.h"
 #include "lwip/pbuf.h"
@@ -19,6 +21,153 @@
 #include "netif/etharp.h"
 
 namespace candy {
+
+namespace {
+
+// 去除字符串首尾空白（含 \r，兼容 CRLF 配置文件）。
+std::string trimWs(const std::string &s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) {
+        return "";
+    }
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// 按分隔符切分并去空白，丢弃空片段。
+std::vector<std::string> splitTrim(const std::string &s, char sep) {
+    std::vector<std::string> out;
+    std::string cur;
+    std::istringstream iss(s);
+    while (std::getline(iss, cur, sep)) {
+        std::string t = trimWs(cur);
+        if (!t.empty()) {
+            out.push_back(t);
+        }
+    }
+    return out;
+}
+
+// 解析单条 socks5 上游："socks5://[user:pass@]host:port"。成功返回 true。
+bool parseSocks5Url(const std::string &url, Endpoint &server, std::string &user, std::string &pass) {
+    const std::string scheme = "socks5://";
+    if (url.compare(0, scheme.size(), scheme) != 0) {
+        return false;
+    }
+    std::string rest = url.substr(scheme.size());
+    // 可选 user:pass@
+    auto at = rest.find('@');
+    if (at != std::string::npos) {
+        std::string cred = rest.substr(0, at);
+        rest = rest.substr(at + 1);
+        auto colon = cred.find(':');
+        if (colon == std::string::npos) {
+            return false;
+        }
+        user = cred.substr(0, colon);
+        pass = cred.substr(colon + 1);
+    }
+    // host:port
+    auto colon = rest.rfind(':');
+    if (colon == std::string::npos) {
+        return false;
+    }
+    std::string host = rest.substr(0, colon);
+    std::string portStr = rest.substr(colon + 1);
+    int port = 0;
+    try {
+        port = std::stoi(portStr);
+    } catch (...) {
+        return false;
+    }
+    if (port <= 0 || port > 65535) {
+        return false;
+    }
+    server.host = IP4(host);
+    server.port = (uint16_t)port;
+    return true;
+}
+
+} // namespace
+
+void NetStack::configureOutbounds(const std::string &socks5Upstream, const std::string &outboundRules) {
+    // 空配置：不建任何 socks5/规则，getOutbound 恒返回 direct，行为完全等价阶段一/二。
+    if (trimWs(socks5Upstream).empty() && trimWs(outboundRules).empty()) {
+        return;
+    }
+
+    // 1) 解析 socks5 上游："name=socks5://[user:pass@]host:port;..."
+    for (const auto &item : splitTrim(socks5Upstream, ';')) {
+        auto eq = item.find('=');
+        if (eq == std::string::npos) {
+            spdlog::warn("netstack: bad socks5-upstream entry: {}", item);
+            continue;
+        }
+        std::string name = trimWs(item.substr(0, eq));
+        std::string url = trimWs(item.substr(eq + 1));
+        Endpoint server{};
+        std::string user, pass;
+        if (name.empty() || !parseSocks5Url(url, server, user, pass)) {
+            spdlog::warn("netstack: bad socks5-upstream url: {}", item);
+            continue;
+        }
+        this->outbounds[name] = std::make_unique<Socks5Outbound>(server, user, pass);
+        spdlog::info("netstack: socks5 outbound '{}' -> {}:{}", name, server.host.toString(), server.port);
+    }
+
+    // 2) 解析分流规则："dst-cidr:CIDR => name; dst-port:PORT => name; default => name;"
+    //    自上而下即匹配优先级，与 03 文档 §5.1 一致。
+    for (const auto &line : splitTrim(outboundRules, ';')) {
+        auto arrow = line.find("=>");
+        if (arrow == std::string::npos) {
+            spdlog::warn("netstack: bad outbound-rule (no =>): {}", line);
+            continue;
+        }
+        std::string cond = trimWs(line.substr(0, arrow));
+        std::string target = trimWs(line.substr(arrow + 2));
+        if (target.empty()) {
+            spdlog::warn("netstack: bad outbound-rule (empty target): {}", line);
+            continue;
+        }
+        Router::Rule rule{};
+        rule.outbound = target;
+        if (cond == "default") {
+            this->router.setDefault(target);
+            spdlog::info("netstack: rule default => {}", target);
+            continue;
+        }
+        const std::string cidrPfx = "dst-cidr:";
+        const std::string portPfx = "dst-port:";
+        if (cond.compare(0, cidrPfx.size(), cidrPfx) == 0) {
+            std::string cidr = trimWs(cond.substr(cidrPfx.size()));
+            Address addr;
+            if (addr.fromCidr(cidr)) {
+                spdlog::warn("netstack: bad dst-cidr: {}", cidr);
+                continue;
+            }
+            rule.type = Router::MatchType::DstCidr;
+            rule.cidr = addr.Host();
+            rule.mask = addr.Mask();
+            this->router.addRule(rule);
+            spdlog::info("netstack: rule dst-cidr:{} => {}", cidr, target);
+        } else if (cond.compare(0, portPfx.size(), portPfx) == 0) {
+            std::string portStr = trimWs(cond.substr(portPfx.size()));
+            int port = 0;
+            try {
+                port = std::stoi(portStr);
+            } catch (...) {
+                spdlog::warn("netstack: bad dst-port: {}", portStr);
+                continue;
+            }
+            rule.type = Router::MatchType::DstPort;
+            rule.port = (uint16_t)port;
+            this->router.addRule(rule);
+            spdlog::info("netstack: rule dst-port:{} => {}", port, target);
+        } else {
+            spdlog::warn("netstack: unsupported rule condition: {}", cond);
+        }
+    }
+}
 
 NetStack::NetStack() : client(nullptr), running(false), listenPcb(nullptr), udpListenPcb(nullptr) {
     std::memset(&this->lwipNetif, 0, sizeof(this->lwipNetif));
@@ -37,7 +186,18 @@ Reactor &NetStack::getReactor() {
     return this->reactor;
 }
 
-Outbound &NetStack::getOutbound() {
+Outbound &NetStack::getOutbound(const Router::FlowKey &flow) {
+    // 无规则时 router.match 恒返回兜底 "direct"，直接复用 directOutbound，零回归。
+    const std::string name = this->router.match(flow);
+    if (name == "direct" || name.empty()) {
+        return this->directOutbound;
+    }
+    auto it = this->outbounds.find(name);
+    if (it != this->outbounds.end() && it->second) {
+        return *it->second;
+    }
+    // 命中了一个未注册的出站名（配置不一致），安全兜底回 direct，避免丢流。
+    spdlog::warn("netstack: outbound '{}' not found, fallback to direct", name);
     return this->directOutbound;
 }
 
