@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "netstack/session_tcp.h"
 #include "netstack/netstack.h"
+#include "netstack/sockcompat.h"
 #include <algorithm>
 #include <cstring>
 #include <spdlog/spdlog.h>
@@ -10,10 +11,9 @@
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#elif defined(_WIN32) || defined(_WIN64)
+#include <ws2tcpip.h>
 #endif
 
 namespace candy {
@@ -32,7 +32,7 @@ SessionTcp::SessionTcp(NetStack *stack, struct tcp_pcb *pcb)
 
 SessionTcp::~SessionTcp() {
     if (this->fd >= 0) {
-        ::close(this->fd);
+        netClose(this->fd);
         this->fd = -1;
     }
 }
@@ -45,14 +45,13 @@ int SessionTcp::start() {
     tcp_sent(this->pcb, sentTrampoline);
     tcp_err(this->pcb, errTrampoline);
 
-#if defined(__linux__) || defined(__APPLE__)
-    this->fd = ::socket(AF_INET, SOCK_STREAM, 0);
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
+    this->fd = (int)::socket(AF_INET, SOCK_STREAM, 0);
     if (this->fd < 0) {
-        spdlog::warn("session tcp socket failed: {}", strerror(errno));
+        spdlog::warn("session tcp socket failed: {}", netErrStr(netLastError()));
         return -1;
     }
-    int flags = ::fcntl(this->fd, F_GETFL, 0);
-    ::fcntl(this->fd, F_SETFL, flags | O_NONBLOCK);
+    netSetNonBlocking(this->fd);
 
     struct sockaddr_in dst = {};
     dst.sin_family = AF_INET;
@@ -60,10 +59,10 @@ int SessionTcp::start() {
     dst.sin_addr.s_addr = uint32_t(this->origDst);
 
     int ret = ::connect(this->fd, (struct sockaddr *)&dst, sizeof(dst));
-    if (ret != 0 && errno != EINPROGRESS) {
+    if (ret != 0 && !netInProgress(netLastError())) {
         spdlog::warn("session tcp connect {}:{} failed: {}", this->origDst.toString(), this->origDstPort,
-                     strerror(errno));
-        ::close(this->fd);
+                     netErrStr(netLastError()));
+        netClose(this->fd);
         this->fd = -1;
         return -1;
     }
@@ -285,10 +284,10 @@ void SessionTcp::shutdownFromStack() {
     if (!this->closing.exchange(true)) {
         auto holder = shared_from_this();
         this->stack->getReactor().post([holder] {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
             if (holder->fd >= 0) {
                 holder->stack->getReactor().del(holder->fd);
-                ::close(holder->fd);
+                netClose(holder->fd);
                 holder->fd = -1;
             }
 #endif
@@ -322,11 +321,17 @@ void SessionTcp::onFdEvent(uint32_t events) {
 }
 
 void SessionTcp::onConnected() {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     int err = 0;
+#if defined(_WIN32) || defined(_WIN64)
+    int len = sizeof(err);
+    int ret = ::getsockopt((SOCKET)this->fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len);
+#else
     socklen_t len = sizeof(err);
-    if (::getsockopt(this->fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
-        spdlog::warn("session tcp connect result error: {}", strerror(err ? err : errno));
+    int ret = ::getsockopt(this->fd, SOL_SOCKET, SO_ERROR, &err, &len);
+#endif
+    if (ret != 0 || err != 0) {
+        spdlog::warn("session tcp connect result error: {}", netErrStr(err ? err : netLastError()));
         closeFromReactor();
         return;
     }
@@ -337,7 +342,7 @@ void SessionTcp::onConnected() {
 }
 
 void SessionTcp::flushForwardLocked() {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     if (this->fd < 0 || !this->connected) {
         return;
     }
@@ -347,13 +352,13 @@ void SessionTcp::flushForwardLocked() {
     {
         std::unique_lock lock(this->bufMutex);
         while (!this->forwardBuf.empty()) {
-            ssize_t n = ::write(this->fd, this->forwardBuf.data(), this->forwardBuf.size());
+            long n = netSend(this->fd, this->forwardBuf.data(), this->forwardBuf.size());
             if (n > 0) {
                 this->forwardBuf.erase(0, n);
                 acked += (size_t)n;
                 continue;
             }
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (n < 0 && netWouldBlock(netLastError())) {
                 this->wantWrite = true;
                 this->stack->getReactor().mod(this->fd, ReactorEvent::READ | ReactorEvent::WRITE);
                 blocked = true;
@@ -390,7 +395,7 @@ void SessionTcp::onFdWritable() {
 }
 
 void SessionTcp::onFdReadable() {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     char buf[65536];
     while (true) {
         // 同步背压：积压超过高水位立即停读，避免单线程 NetStack 被 writeToLwip 任务淹没。
@@ -404,7 +409,7 @@ void SessionTcp::onFdReadable() {
             this->stack->getReactor().mod(this->fd, ReactorEvent::NONE);
             return;
         }
-        ssize_t n = ::read(this->fd, buf, sizeof(buf));
+        long n = netRecv(this->fd, buf, sizeof(buf));
         if (n > 0) {
             this->backwardBytes.fetch_add((size_t)n);
             std::string data(buf, n);
@@ -419,7 +424,7 @@ void SessionTcp::onFdReadable() {
             this->stack->getReactor().del(this->fd);
             return;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (netWouldBlock(netLastError())) {
             return;
         }
         closeFromReactor();
@@ -432,10 +437,10 @@ void SessionTcp::closeFromReactor() {
     if (this->closing.exchange(true)) {
         return;
     }
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     if (this->fd >= 0) {
         this->stack->getReactor().del(this->fd);
-        ::close(this->fd);
+        netClose(this->fd);
         this->fd = -1;
     }
 #endif

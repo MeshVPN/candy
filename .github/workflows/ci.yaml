@@ -1,0 +1,78 @@
+name: ci
+
+# 编译级回归门禁：在 linux / macos / windows 三个 runner 上做编译验证。
+# 与 check.yaml（仅 PR 触发 + clang-format）互补，这里在每次 push 与手动触发时也跑，
+# 任意一端编译失败即让流水线变红，挡住编译级回归。
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# 同一分支/PR 的新提交会取消上一次仍在跑的任务，节省 runner 时间。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      # 与 dockerfile 保持一致：alpine + ninja + g++ 的权威编译环境。
+      - name: build (docker)
+        run: docker build .
+
+  macos:
+    name: build-macos
+    runs-on: macos-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      # macOS 走 kqueue 后端，依赖通过 homebrew 安装。
+      - name: depends
+        run: brew update && brew install fmt poco spdlog openssl@3
+      - name: build
+        run: |
+          if [ "$RUNNER_ARCH" == "ARM64" ]; then
+            export CPATH=/opt/homebrew/include
+            export LIBRARY_PATH=/opt/homebrew/lib
+            export OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3
+          else
+            export CPATH=/usr/local/include
+            export LIBRARY_PATH=/usr/local/lib
+            export OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
+          fi
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+
+  windows:
+    name: build-windows
+    runs-on: windows-latest
+    steps:
+      # Windows 当前为占位实现（reactor 为 IOCP/select stub），仅做编译验证。
+      - name: depends
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-spdlog
+            mingw-w64-x86_64-poco
+            mingw-w64-x86_64-openssl
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: cache
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: ${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+      - name: build
+        shell: msys2 {0}
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build
