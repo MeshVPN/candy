@@ -3,6 +3,7 @@
 #define CANDY_NETSTACK_NETSTACK_H
 
 #include "core/net.h"
+#include "netstack/outbound.h"
 #include "netstack/reactor.h"
 #include <atomic>
 #include <chrono>
@@ -46,6 +47,8 @@ public:
     // 供 Session 使用：在 NetStack 线程内执行任务（保证 lwIP API 线程安全）。
     void postToStack(std::function<void()> task);
     Reactor &getReactor();
+    // 当前出站：默认 DirectOutbound（内核 socket 直连落地）。Session 经此发起落地拨号。
+    Outbound &getOutbound();
     // UDP 回包注入用：拿到本模块的 lwIP netif（仅 NetStack 线程使用）。
     struct netif &getNetif();
 
@@ -99,6 +102,10 @@ private:
     struct udp_pcb *udpListenPcb;
 
     Reactor reactor;
+
+    // 落地出站：阶段一/二恒为 DirectOutbound（内核 socket 直连）。阶段三引入 Router
+    // 后按流选择，此处先固定 direct，保证现有 kernel/userspace 行为不变。
+    DirectOutbound directOutbound;
 
     // NetStack 线程任务队列（用带超时读驱动定时器）
     std::mutex stackTaskMutex;

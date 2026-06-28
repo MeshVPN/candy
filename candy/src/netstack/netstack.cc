@@ -37,6 +37,10 @@ Reactor &NetStack::getReactor() {
     return this->reactor;
 }
 
+Outbound &NetStack::getOutbound() {
+    return this->directOutbound;
+}
+
 int NetStack::run(Client *client) {
     this->client = client;
     this->running.store(true);

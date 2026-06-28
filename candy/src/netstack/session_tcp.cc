@@ -46,24 +46,10 @@ int SessionTcp::start() {
     tcp_err(this->pcb, errTrampoline);
 
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
-    this->fd = (int)::socket(AF_INET, SOCK_STREAM, 0);
+    // 落地拨号交给 Outbound（阶段一/二为 DirectOutbound，内核 socket 直连）。
+    // 返回已发起 connect（EINPROGRESS 视为成功）的非阻塞 fd，后续 splice/背压逻辑不变。
+    this->fd = this->stack->getOutbound().dialTcp(Endpoint{this->origDst, this->origDstPort});
     if (this->fd < 0) {
-        spdlog::warn("session tcp socket failed: {}", netErrStr(netLastError()));
-        return -1;
-    }
-    netSetNonBlocking(this->fd);
-
-    struct sockaddr_in dst = {};
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(this->origDstPort);
-    dst.sin_addr.s_addr = uint32_t(this->origDst);
-
-    int ret = ::connect(this->fd, (struct sockaddr *)&dst, sizeof(dst));
-    if (ret != 0 && !netInProgress(netLastError())) {
-        spdlog::warn("session tcp connect {}:{} failed: {}", this->origDst.toString(), this->origDstPort,
-                     netErrStr(netLastError()));
-        netClose(this->fd);
-        this->fd = -1;
         return -1;
     }
 
