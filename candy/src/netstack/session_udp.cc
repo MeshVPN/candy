@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "netstack/session_udp.h"
 #include "netstack/netstack.h"
+#include "netstack/sockcompat.h"
 #include <cstring>
 #include <spdlog/spdlog.h>
 
@@ -9,10 +10,9 @@
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#elif defined(_WIN32) || defined(_WIN64)
+#include <ws2tcpip.h>
 #endif
 
 namespace candy {
@@ -30,22 +30,21 @@ SessionUdp::SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16
 
 SessionUdp::~SessionUdp() {
     if (this->fd >= 0) {
-        ::close(this->fd);
+        netClose(this->fd);
         this->fd = -1;
     }
 }
 
 int SessionUdp::start() {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     this->self = shared_from_this();
 
-    this->fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    this->fd = (int)::socket(AF_INET, SOCK_DGRAM, 0);
     if (this->fd < 0) {
-        spdlog::warn("session udp socket failed: {}", strerror(errno));
+        spdlog::warn("session udp socket failed: {}", netErrStr(netLastError()));
         return -1;
     }
-    int flags = ::fcntl(this->fd, F_GETFL, 0);
-    ::fcntl(this->fd, F_SETFL, flags | O_NONBLOCK);
+    netSetNonBlocking(this->fd);
 
     // connect 固定对端：内核自动填源地址 = 网关 LAN IP（等价 MASQUERADE），
     // 且后续 send/recv 只与该对端往来，形成 Fullcone NAT 的伪会话。
@@ -55,8 +54,8 @@ int SessionUdp::start() {
     dst.sin_addr.s_addr = uint32_t(this->origDst);
     if (::connect(this->fd, (struct sockaddr *)&dst, sizeof(dst)) != 0) {
         spdlog::warn("session udp connect {}:{} failed: {}", this->origDst.toString(), this->origDstPort,
-                     strerror(errno));
-        ::close(this->fd);
+                     netErrStr(netLastError()));
+        netClose(this->fd);
         this->fd = -1;
         return -1;
     }
@@ -101,13 +100,13 @@ void SessionUdp::sendToLanding(std::string data) {
     this->lastActiveTs = std::chrono::steady_clock::now();
     auto holder = shared_from_this();
     this->stack->getReactor().post([holder, data = std::move(data)]() mutable {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
         if (holder->fd < 0 || holder->closing.load()) {
             return;
         }
-        ssize_t n = ::send(holder->fd, data.data(), data.size(), 0);
-        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            spdlog::debug("session udp send failed: {}", strerror(errno));
+        long n = netSend(holder->fd, data.data(), data.size());
+        if (n < 0 && !netWouldBlock(netLastError())) {
+            spdlog::debug("session udp send failed: {}", netErrStr(netLastError()));
         }
 #endif
     });
@@ -163,10 +162,10 @@ void SessionUdp::shutdownFromStack() {
     if (!this->closing.exchange(true)) {
         auto holder = shared_from_this();
         this->stack->getReactor().post([holder] {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
             if (holder->fd >= 0) {
                 holder->stack->getReactor().del(holder->fd);
-                ::close(holder->fd);
+                netClose(holder->fd);
                 holder->fd = -1;
             }
 #endif
@@ -189,10 +188,10 @@ void SessionUdp::onFdEvent(uint32_t events) {
 }
 
 void SessionUdp::onFdReadable() {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     char buf[65536];
     while (true) {
-        ssize_t n = ::recv(this->fd, buf, sizeof(buf), 0);
+        long n = netRecv(this->fd, buf, sizeof(buf));
         if (n > 0) {
             std::string data(buf, n);
             auto holder = shared_from_this();
@@ -202,7 +201,7 @@ void SessionUdp::onFdReadable() {
         if (n == 0) {
             return;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (netWouldBlock(netLastError())) {
             return;
         }
         // 落地 socket 错误（如 ICMP port unreachable 经 connect 返回 ECONNREFUSED）：关闭会话。
@@ -216,10 +215,10 @@ void SessionUdp::closeFromReactor() {
     if (this->closing.exchange(true)) {
         return;
     }
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     if (this->fd >= 0) {
         this->stack->getReactor().del(this->fd);
-        ::close(this->fd);
+        netClose(this->fd);
         this->fd = -1;
     }
 #endif
