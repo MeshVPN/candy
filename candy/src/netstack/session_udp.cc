@@ -39,24 +39,10 @@ int SessionUdp::start() {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     this->self = shared_from_this();
 
-    this->fd = (int)::socket(AF_INET, SOCK_DGRAM, 0);
+    // 落地拨号交给 Outbound（阶段一/二为 DirectOutbound）。connect 固定对端，
+    // 内核自动填源地址 = 网关 LAN IP（等价 MASQUERADE），形成 Fullcone NAT 伪会话。
+    this->fd = this->stack->getOutbound().dialUdp(Endpoint{this->origDst, this->origDstPort});
     if (this->fd < 0) {
-        spdlog::warn("session udp socket failed: {}", netErrStr(netLastError()));
-        return -1;
-    }
-    netSetNonBlocking(this->fd);
-
-    // connect 固定对端：内核自动填源地址 = 网关 LAN IP（等价 MASQUERADE），
-    // 且后续 send/recv 只与该对端往来，形成 Fullcone NAT 的伪会话。
-    struct sockaddr_in dst = {};
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(this->origDstPort);
-    dst.sin_addr.s_addr = uint32_t(this->origDst);
-    if (::connect(this->fd, (struct sockaddr *)&dst, sizeof(dst)) != 0) {
-        spdlog::warn("session udp connect {}:{} failed: {}", this->origDst.toString(), this->origDstPort,
-                     netErrStr(netLastError()));
-        netClose(this->fd);
-        this->fd = -1;
         return -1;
     }
 
