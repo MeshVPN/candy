@@ -46,12 +46,21 @@ int SessionTcp::start() {
     tcp_err(this->pcb, errTrampoline);
 
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
-    // 落地拨号交给 Outbound（阶段一/二为 DirectOutbound，内核 socket 直连）。
+    // 按流分流：Router.match(origSrc/origDst/proto/dstPort) 选出 outbound（direct/socks5）。
+    // 无规则时恒为 DirectOutbound，与阶段一/二行为完全一致（零回归）。
+    Router::FlowKey flow{this->origSrc, this->origDst, IPPROTO_TCP, this->origDstPort};
+    Outbound &outbound = this->stack->getOutbound(flow);
+
+    // 落地拨号交给选中的 Outbound（direct: 连目的；socks5: 连 server）。
     // 返回已发起 connect（EINPROGRESS 视为成功）的非阻塞 fd，后续 splice/背压逻辑不变。
-    this->fd = this->stack->getOutbound().dialTcp(Endpoint{this->origDst, this->origDstPort});
+    this->fd = outbound.dialTcp(Endpoint{this->origDst, this->origDstPort});
     if (this->fd < 0) {
         return -1;
     }
+
+    // 询问 outbound 是否需要应用层握手（socks5 返回 Socks5Client；direct 返回 nullptr）。
+    // 为空时后续走原有直连 splice 路径，字节完全不变（direct 零回归的关键）。
+    this->handshake = outbound.makeTcpHandshake(Endpoint{this->origDst, this->origDstPort});
 
     spdlog::debug("session tcp: {} -> {}:{}", this->origSrc.toString(), this->origDst.toString(), this->origDstPort);
 
@@ -298,6 +307,21 @@ void SessionTcp::onFdEvent(uint32_t events) {
     }
     // 已连接：优先把可读数据/EOF 读干净（read 返回 0 走优雅排空，返回 -1 走关闭），
     // 避免 ERROR/HUP 与可读数据同时到达时抢先关闭而丢失尾部数据。
+    // 握手阶段（handshake 非空）：事件分流到握手处理，握手完成后置空，转入下方 splice。
+    if (this->handshake) {
+        if (ev & ReactorEvent::ERROR) {
+            closeFromReactor();
+            return;
+        }
+        if (ev & ReactorEvent::READ) {
+            onHandshakeReadable();
+        }
+        // onHandshakeReadable 内可能完成握手并置空 handshake；若仍在握手则处理可写。
+        if (this->handshake && (ev & ReactorEvent::WRITE)) {
+            onHandshakeWritable();
+        }
+        return;
+    }
     if (ev & (ReactorEvent::READ | ReactorEvent::ERROR)) {
         onFdReadable();
     }
@@ -322,6 +346,113 @@ void SessionTcp::onConnected() {
         return;
     }
     this->connected = true;
+    // socks5 等需要握手：先进入握手阶段（在落地通道上完成 CONNECT），完成后再 splice。
+    // direct 无握手（handshake==nullptr），走下方原有 splice 路径，行为字节不变。
+    if (this->handshake) {
+        spdlog::debug("session tcp handshake begin {} -> {}:{}", this->origSrc.toString(), this->origDst.toString(),
+                      this->origDstPort);
+        // 注册读写：先把握手首包（auth methods）写出，并等待服务端应答。
+        this->stack->getReactor().mod(this->fd, ReactorEvent::READ | ReactorEvent::WRITE);
+        flushHandshakeOutbound();
+        return;
+    }
+    this->stack->getReactor().mod(this->fd, ReactorEvent::READ);
+    flushForwardLocked();
+#endif
+}
+
+// ===================== 握手阶段（Reactor 线程） =====================
+
+void SessionTcp::flushHandshakeOutbound() {
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
+    if (!this->handshake || this->fd < 0) {
+        return;
+    }
+    // 先把握手器新产生的待发字节拼到残留 outbox 后面（保证发送顺序）。
+    if (this->handshake->hasOutbound()) {
+        std::vector<uint8_t> out = this->handshake->takeOutbound();
+        this->handshakeOutbox.append(reinterpret_cast<const char *>(out.data()), out.size());
+    }
+    // 非阻塞写出 outbox；部分写则保留剩余，注册 WRITE 等待下次可写。
+    while (!this->handshakeOutbox.empty()) {
+        long n = netSend(this->fd, this->handshakeOutbox.data(), this->handshakeOutbox.size());
+        if (n > 0) {
+            this->handshakeOutbox.erase(0, n);
+            continue;
+        }
+        if (n < 0 && netWouldBlock(netLastError())) {
+            this->stack->getReactor().mod(this->fd, ReactorEvent::READ | ReactorEvent::WRITE);
+            return;
+        }
+        spdlog::warn("session tcp handshake send failed: {}", netErrStr(netLastError()));
+        closeFromReactor();
+        return;
+    }
+    // outbox 已排空：只需等待服务端应答，去掉 WRITE 关注。
+    this->stack->getReactor().mod(this->fd, ReactorEvent::READ);
+#endif
+}
+
+void SessionTcp::onHandshakeWritable() {
+    flushHandshakeOutbound();
+}
+
+void SessionTcp::onHandshakeReadable() {
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
+    if (!this->handshake) {
+        return;
+    }
+    char buf[4096];
+    while (true) {
+        long n = netRecv(this->fd, buf, sizeof(buf));
+        if (n > 0) {
+            if (!this->handshake->feed(reinterpret_cast<const uint8_t *>(buf), (size_t)n)) {
+                spdlog::warn("session tcp socks5 handshake failed: {}", this->handshake->error());
+                closeFromReactor();
+                return;
+            }
+            if (this->handshake->done()) {
+                finishHandshake();
+                return;
+            }
+            // 未完成：握手器可能产生了下一段待发字节（如收到认证应答后要发 CONNECT 请求）。
+            if (this->handshake->hasOutbound()) {
+                flushHandshakeOutbound();
+            }
+            continue;
+        }
+        if (n == 0) {
+            spdlog::warn("session tcp socks5 server closed during handshake");
+            closeFromReactor();
+            return;
+        }
+        if (netWouldBlock(netLastError())) {
+            return;
+        }
+        spdlog::warn("session tcp handshake recv failed: {}", netErrStr(netLastError()));
+        closeFromReactor();
+        return;
+    }
+#endif
+}
+
+void SessionTcp::finishHandshake() {
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
+    // 握手成功：取走应答后粘连的业务数据（若有），当作 fd 先收到的反向数据灌给 lwIP，
+    // 避免丢失。然后销毁握手器，转入与 direct 完全一致的 splice 路径。
+    std::vector<uint8_t> leftover = this->handshake->takeLeftover();
+    spdlog::debug("session tcp socks5 handshake done {} -> {}:{} leftover={}", this->origSrc.toString(),
+                  this->origDst.toString(), this->origDstPort, leftover.size());
+    this->handshake.reset();
+
+    if (!leftover.empty()) {
+        this->backwardBytes.fetch_add(leftover.size());
+        std::string data(reinterpret_cast<const char *>(leftover.data()), leftover.size());
+        auto holder = shared_from_this();
+        this->stack->postToStack([holder, data = std::move(data)]() mutable { holder->writeToLwip(data); });
+    }
+    // 进入正常 splice：只关注可读（与 onConnected 的 direct 分支一致），并把握手期间
+    // lwIP 侧已缓冲的待发数据（forwardBuf）灌向落地 fd。
     this->stack->getReactor().mod(this->fd, ReactorEvent::READ);
     flushForwardLocked();
 #endif
@@ -330,6 +461,12 @@ void SessionTcp::onConnected() {
 void SessionTcp::flushForwardLocked() {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     if (this->fd < 0 || !this->connected) {
+        return;
+    }
+    // 握手未完成时严禁向落地 fd 写业务数据：此时 fd 上跑的是 socks5 握手字节流，
+    // 若把 lwIP 侧已到达的业务数据(如 HTTP 请求)插进去会破坏协议。业务数据先在
+    // forwardBuf 里缓冲，待 finishHandshake() 完成后再由其调用本函数统一灌出。
+    if (this->handshake) {
         return;
     }
     size_t acked = 0;

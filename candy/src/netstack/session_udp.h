@@ -4,6 +4,7 @@
 
 #include "core/net.h"
 #include "netstack/session.h"
+#include "netstack/tcp_handshake.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -56,6 +57,17 @@ private:
     void onFdReadable();
     void closeFromReactor();
 
+    // socks5 UDP ASSOCIATE 分支（均在 Reactor 线程驱动）：
+    //   控制连接(ctrlFd)：connect 完成 -> 跑 UDP ASSOCIATE 握手 -> 拿到中继端点 ->
+    //   建中继 UDP socket(fd) connect 到中继端点；之后 fd 上收发都加/去 socks5 UDP 头。
+    //   ctrlFd 保活，其关闭即关联失效，会话关闭。
+    void onCtrlEvent(uint32_t events);
+    void onCtrlConnected();
+    void onCtrlReadable();
+    void onCtrlWritable();
+    void flushCtrlOutbound();
+    void finishAssociate();
+
     // ---- NetStack 线程 ----
     // 本流后续数据报到达：addr/port=源端(dev1)，提取数据投递到落地 fd 发送。
     void onPcbRecv(struct pbuf *p, const ip_addr_t *addr, u16_t port);
@@ -66,6 +78,18 @@ private:
 private:
     struct udp_pcb *pcb;
     int fd;
+
+    // ---- socks5 UDP ASSOCIATE 专用（direct 路径全程为默认值，不影响行为）----
+    bool useSocks5 = false;          // 命中 socks5 出站（需 UDP ASSOCIATE）
+    int ctrlFd = -1;                 // socks5 TCP 控制连接 fd（保活）
+    bool ctrlConnected = false;      // 控制连接 connect 是否完成
+    std::unique_ptr<TcpHandshake> associate; // UDP ASSOCIATE 握手器（完成后置空）
+    std::string ctrlOutbox;          // 控制连接待发字节残留（非阻塞部分写）
+    bool relayReady = false;         // 中继 fd 是否已就绪（握手完成、connect 中继后置真）
+    IP4 relayHost;                   // socks5 UDP 中继端点
+    uint16_t relayPort = 0;
+    IP4 proxyServerHost;             // socks5 server IP（中继地址为 0.0.0.0 时回退用）
+    std::string pendingDatagrams;    // 握手期间 lwIP 侧到达的数据报暂存（带长度前缀串联）
 
     IP4 origSrc;
     uint16_t origSrcPort;

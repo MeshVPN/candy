@@ -124,10 +124,20 @@ void Client::setForwardMode(const std::string &mode) {
     this->forwardMode = mode;
 }
 
+void Client::setSocks5Upstream(const std::string &upstream) {
+    this->socks5Upstream = upstream;
+}
+
+void Client::setOutboundRules(const std::string &rules) {
+    this->outboundRules = rules;
+}
+
 void Client::run() {
     this->running.store(true);
 
     if (this->forwardMode == "userspace") {
+        // 阶段三：在 NetStack 启动前注入 socks5 上游与分流规则（空时全部走 direct，零回归）。
+        netstack.configureOutbounds(this->socks5Upstream, this->outboundRules);
         if (netstack.run(this)) {
             return;
         }
