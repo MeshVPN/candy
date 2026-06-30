@@ -94,6 +94,10 @@ endif()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+# libev：事件循环库（reactor 后端，一份代码全平台）。
+# 采用 vendored 源码编译（third_party/libev），不依赖系统库，三平台开箱即用。
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/libev.cmake)
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/lwip.cmake)
 
 add_subdirectory(candy)

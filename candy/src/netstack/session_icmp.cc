@@ -199,9 +199,13 @@ void SessionIcmp::onFdReadable() {
         ssize_t n = ::recv(this->fd, buf, sizeof(buf), 0);
         if (n > 0) {
             size_t off = 0;
-            // RAW ICMP socket 收到的是含 IP 头的整包，需剥掉 IP 头取 ICMP；
-            // DGRAM ICMP socket 收到的直接是 ICMP 报文。
-            if (this->rawMode && n >= (ssize_t)sizeof(IP4Header)) {
+            // 按首字节探测是否带 IP 头，跨平台健壮：
+            //   - RAW ICMP socket(Linux/mac)：recv 始终返回含 IP 头的整包；
+            //   - macOS 的 DGRAM ICMP socket：也返回含 IP 头的整包（与 Linux 不同）；
+            //   - Linux 的 DGRAM ICMP socket：返回纯 ICMP 报文(首字节=type，echo reply=0)。
+            // IPv4 头首字节高 4 位为版本号 4(即 0x4X)，而 ICMP echo reply 首字节(type)恒为 0，
+            // 二者不会混淆，故用 version==4 判定是否需要剥头，避免依赖 rawMode 漏判 mac dgram。
+            if (n >= (ssize_t)sizeof(IP4Header) && (((uint8_t *)buf)[0] >> 4) == 4) {
                 uint8_t ihl = (((uint8_t *)buf)[0] & 0x0f) * 4;
                 if ((ssize_t)ihl <= n) {
                     off = ihl;

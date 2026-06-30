@@ -1,692 +1,260 @@
 // SPDX-License-Identifier: MIT
 #include "netstack/reactor.h"
+#include <ev.h>
 #include <spdlog/spdlog.h>
-
-#if defined(__linux__)
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
-#include <unistd.h>
-#elif defined(__APPLE__)
-#include <sys/event.h>
-#include <sys/types.h>
-#include <unistd.h>
-#elif defined(_WIN32) || defined(_WIN64)
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
-#include <vector>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#endif
 
 namespace candy {
 
-#if defined(__linux__)
+// 每个落地 fd 对应一个 IoWatcher：内嵌 libev 的 ev_io，并携带 fd、所属 Reactor 与事件回调。
+// 仅 reactor 线程创建/销毁/访问。io.data 指回本结构以便在静态回调里取回上下文。
+struct IoWatcher {
+    ev_io io;
+    int fd;
+    Reactor *reactor;
+    Reactor::EventHandler handler;
+    ReactorEvent events;
+};
 
-static uint32_t toEpollEvents(ReactorEvent events) {
-    uint32_t ev = 0;
+static int toEvEvents(ReactorEvent events) {
+    int ev = 0;
     if (events & ReactorEvent::READ) {
-        ev |= EPOLLIN;
+        ev |= EV_READ;
     }
     if (events & ReactorEvent::WRITE) {
-        ev |= EPOLLOUT;
+        ev |= EV_WRITE;
     }
     return ev;
 }
 
-static ReactorEvent fromEpollEvents(uint32_t ev) {
+static ReactorEvent fromEvEvents(int revents) {
     ReactorEvent events = ReactorEvent::NONE;
-    if (ev & EPOLLIN) {
+    if (revents & EV_READ) {
         events = events | ReactorEvent::READ;
     }
-    if (ev & EPOLLOUT) {
+    if (revents & EV_WRITE) {
         events = events | ReactorEvent::WRITE;
     }
-    if (ev & (EPOLLERR | EPOLLHUP)) {
+    if (revents & EV_ERROR) {
         events = events | ReactorEvent::ERROR;
     }
     return events;
 }
 
-Reactor::Reactor() : epollFd(-1), wakeupFd(-1), running(false) {}
+Reactor::Reactor() : evLoop(nullptr), asyncWatcher(nullptr), running(false) {}
 
 Reactor::~Reactor() {
     stop();
 }
 
-int Reactor::start() {
-    this->epollFd = epoll_create1(EPOLL_CLOEXEC);
-    if (this->epollFd < 0) {
-        spdlog::error("reactor epoll_create1 failed: {}", strerror(errno));
-        return -1;
-    }
-
-    this->wakeupFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (this->wakeupFd < 0) {
-        spdlog::error("reactor eventfd failed: {}", strerror(errno));
-        ::close(this->epollFd);
-        this->epollFd = -1;
-        return -1;
-    }
-
-    struct epoll_event ee = {};
-    ee.events = EPOLLIN;
-    ee.data.fd = this->wakeupFd;
-    if (epoll_ctl(this->epollFd, EPOLL_CTL_ADD, this->wakeupFd, &ee) != 0) {
-        spdlog::error("reactor add wakeupFd failed: {}", strerror(errno));
-        ::close(this->wakeupFd);
-        ::close(this->epollFd);
-        this->wakeupFd = -1;
-        this->epollFd = -1;
-        return -1;
-    }
-
-    this->running.store(true);
-    this->thread = std::thread([this] { this->loop(); });
-    return 0;
-}
-
-void Reactor::stop() {
-    if (!this->running.exchange(false)) {
-        if (this->thread.joinable()) {
-            this->thread.join();
-        }
-        return;
-    }
-    wakeup();
-    if (this->thread.joinable()) {
-        this->thread.join();
-    }
-    if (this->wakeupFd >= 0) {
-        ::close(this->wakeupFd);
-        this->wakeupFd = -1;
-    }
-    if (this->epollFd >= 0) {
-        ::close(this->epollFd);
-        this->epollFd = -1;
-    }
-}
-
-int Reactor::add(int fd, ReactorEvent events, EventHandler handler) {
-    {
-        std::unique_lock lock(this->handlerMutex);
-        this->handlers[fd] = std::move(handler);
-    }
-    struct epoll_event ee = {};
-    ee.events = toEpollEvents(events);
-    ee.data.fd = fd;
-    if (epoll_ctl(this->epollFd, EPOLL_CTL_ADD, fd, &ee) != 0) {
-        spdlog::error("reactor add fd {} failed: {}", fd, strerror(errno));
-        std::unique_lock lock(this->handlerMutex);
-        this->handlers.erase(fd);
-        return -1;
-    }
-    return 0;
-}
-
-int Reactor::mod(int fd, ReactorEvent events) {
-    struct epoll_event ee = {};
-    ee.events = toEpollEvents(events);
-    ee.data.fd = fd;
-    if (epoll_ctl(this->epollFd, EPOLL_CTL_MOD, fd, &ee) != 0) {
-        spdlog::error("reactor mod fd {} failed: {}", fd, strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
-int Reactor::del(int fd) {
-    epoll_ctl(this->epollFd, EPOLL_CTL_DEL, fd, nullptr);
-    std::unique_lock lock(this->handlerMutex);
-    this->handlers.erase(fd);
-    return 0;
-}
-
-void Reactor::post(Task task) {
-    {
-        std::unique_lock lock(this->taskMutex);
-        this->tasks.push(std::move(task));
-    }
-    wakeup();
-}
-
-void Reactor::wakeup() {
-    uint64_t one = 1;
-    if (this->wakeupFd >= 0) {
-        ssize_t n = ::write(this->wakeupFd, &one, sizeof(one));
-        (void)n;
-    }
-}
-
-void Reactor::drainWakeup() {
-    uint64_t buf;
-    while (::read(this->wakeupFd, &buf, sizeof(buf)) > 0) {
-    }
-}
-
-void Reactor::drainTasks() {
-    std::queue<Task> pending;
-    {
-        std::unique_lock lock(this->taskMutex);
-        std::swap(pending, this->tasks);
-    }
-    while (!pending.empty()) {
-        pending.front()();
-        pending.pop();
-    }
-}
-
-void Reactor::loop() {
-    spdlog::debug("start thread: netstack reactor");
-    constexpr int MAX_EVENTS = 256;
-    struct epoll_event events[MAX_EVENTS];
-    while (this->running.load()) {
-        int n = epoll_wait(this->epollFd, events, MAX_EVENTS, -1);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            spdlog::error("reactor epoll_wait failed: {}", strerror(errno));
-            break;
-        }
-        for (int i = 0; i < n; ++i) {
-            int fd = events[i].data.fd;
-            if (fd == this->wakeupFd) {
-                drainWakeup();
-                drainTasks();
-                continue;
-            }
-            EventHandler handler;
-            {
-                std::unique_lock lock(this->handlerMutex);
-                auto it = this->handlers.find(fd);
-                if (it == this->handlers.end()) {
-                    continue;
-                }
-                handler = it->second;
-            }
-            handler(fromEpollEvents(events[i].events));
-        }
-    }
-    spdlog::debug("stop thread: netstack reactor");
-}
-
-#elif defined(__APPLE__)
-
-// EVFILT_USER 的标识，用于跨线程唤醒 reactor 线程（替代 Linux 的 eventfd）。
-static constexpr uintptr_t WAKEUP_IDENT = 1;
-
-Reactor::Reactor() : kqueueFd(-1), running(false) {}
-
-Reactor::~Reactor() {
-    stop();
-}
-
-int Reactor::start() {
-    this->kqueueFd = kqueue();
-    if (this->kqueueFd < 0) {
-        spdlog::error("reactor kqueue failed: {}", strerror(errno));
-        return -1;
-    }
-
-    // 注册 EVFILT_USER 作为唤醒通道。
-    struct kevent kev = {};
-    EV_SET(&kev, WAKEUP_IDENT, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, nullptr);
-    if (kevent(this->kqueueFd, &kev, 1, nullptr, 0, nullptr) != 0) {
-        spdlog::error("reactor register EVFILT_USER failed: {}", strerror(errno));
-        ::close(this->kqueueFd);
-        this->kqueueFd = -1;
-        return -1;
-    }
-
-    this->running.store(true);
-    this->thread = std::thread([this] { this->loop(); });
-    return 0;
-}
-
-void Reactor::stop() {
-    if (!this->running.exchange(false)) {
-        if (this->thread.joinable()) {
-            this->thread.join();
-        }
-        return;
-    }
-    wakeup();
-    if (this->thread.joinable()) {
-        this->thread.join();
-    }
-    if (this->kqueueFd >= 0) {
-        ::close(this->kqueueFd);
-        this->kqueueFd = -1;
-    }
-}
-
-int Reactor::add(int fd, ReactorEvent events, EventHandler handler) {
-    {
-        std::unique_lock lock(this->handlerMutex);
-        this->handlers[fd] = std::move(handler);
-    }
-
-    // kqueue 的 READ/WRITE 为独立 filter，按兴趣集分别 EV_ADD。
-    struct kevent kev[2];
-    int n = 0;
-    if (events & ReactorEvent::READ) {
-        EV_SET(&kev[n++], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-    }
-    if (events & ReactorEvent::WRITE) {
-        EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-    }
-    if (n > 0 && kevent(this->kqueueFd, kev, n, nullptr, 0, nullptr) != 0) {
-        spdlog::error("reactor add fd {} failed: {}", fd, strerror(errno));
-        std::unique_lock lock(this->handlerMutex);
-        this->handlers.erase(fd);
-        return -1;
-    }
-    this->interests[fd] = events;
-    return 0;
-}
-
-int Reactor::mod(int fd, ReactorEvent events) {
-    // 对比旧兴趣集，对增加的 filter EV_ADD、移除的 filter EV_DELETE，实现整体替换语义。
-    ReactorEvent old = ReactorEvent::NONE;
-    auto it = this->interests.find(fd);
-    if (it != this->interests.end()) {
-        old = it->second;
-    }
-
-    struct kevent kev[2];
-    int n = 0;
-    bool oldRead = (old & ReactorEvent::READ);
-    bool newRead = (events & ReactorEvent::READ);
-    bool oldWrite = (old & ReactorEvent::WRITE);
-    bool newWrite = (events & ReactorEvent::WRITE);
-    if (newRead && !oldRead) {
-        EV_SET(&kev[n++], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-    } else if (!newRead && oldRead) {
-        EV_SET(&kev[n++], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-    }
-    if (newWrite && !oldWrite) {
-        EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-    } else if (!newWrite && oldWrite) {
-        EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
-    }
-    if (n > 0 && kevent(this->kqueueFd, kev, n, nullptr, 0, nullptr) != 0) {
-        // EV_DELETE 对未注册 filter 返回 ENOENT 可忽略。
-        if (errno != ENOENT) {
-            spdlog::error("reactor mod fd {} failed: {}", fd, strerror(errno));
-            return -1;
-        }
-    }
-    this->interests[fd] = events;
-    return 0;
-}
-
-int Reactor::del(int fd) {
-    ReactorEvent old = ReactorEvent::NONE;
-    auto it = this->interests.find(fd);
-    if (it != this->interests.end()) {
-        old = it->second;
-    }
-    struct kevent kev[2];
-    int n = 0;
-    if (old & ReactorEvent::READ) {
-        EV_SET(&kev[n++], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-    }
-    if (old & ReactorEvent::WRITE) {
-        EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
-    }
-    if (n > 0) {
-        kevent(this->kqueueFd, kev, n, nullptr, 0, nullptr);
-    }
-    this->interests.erase(fd);
-    std::unique_lock lock(this->handlerMutex);
-    this->handlers.erase(fd);
-    return 0;
-}
-
-void Reactor::post(Task task) {
-    {
-        std::unique_lock lock(this->taskMutex);
-        this->tasks.push(std::move(task));
-    }
-    wakeup();
-}
-
-void Reactor::wakeup() {
-    if (this->kqueueFd < 0) {
-        return;
-    }
-    struct kevent kev = {};
-    EV_SET(&kev, WAKEUP_IDENT, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
-    kevent(this->kqueueFd, &kev, 1, nullptr, 0, nullptr);
-}
-
-void Reactor::drainWakeup() {
-    // EVFILT_USER 配合 EV_CLEAR 为边沿触发，无需额外清空动作。
-}
-
-void Reactor::drainTasks() {
-    std::queue<Task> pending;
-    {
-        std::unique_lock lock(this->taskMutex);
-        std::swap(pending, this->tasks);
-    }
-    while (!pending.empty()) {
-        pending.front()();
-        pending.pop();
-    }
-}
-
-void Reactor::loop() {
-    spdlog::debug("start thread: netstack reactor");
-    constexpr int MAX_EVENTS = 256;
-    struct kevent events[MAX_EVENTS];
-    while (this->running.load()) {
-        int n = kevent(this->kqueueFd, nullptr, 0, events, MAX_EVENTS, nullptr);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            spdlog::error("reactor kevent failed: {}", strerror(errno));
-            break;
-        }
-        for (int i = 0; i < n; ++i) {
-            if (events[i].filter == EVFILT_USER && events[i].ident == WAKEUP_IDENT) {
-                drainWakeup();
-                drainTasks();
-                continue;
-            }
-            int fd = (int)events[i].ident;
-            EventHandler handler;
-            {
-                std::unique_lock lock(this->handlerMutex);
-                auto it = this->handlers.find(fd);
-                if (it == this->handlers.end()) {
-                    continue;
-                }
-                handler = it->second;
-            }
-            ReactorEvent ev = ReactorEvent::NONE;
-            if (events[i].filter == EVFILT_READ) {
-                ev = ev | ReactorEvent::READ;
-            }
-            if (events[i].filter == EVFILT_WRITE) {
-                ev = ev | ReactorEvent::WRITE;
-            }
-            if (events[i].flags & EV_EOF) {
-                ev = ev | ReactorEvent::ERROR;
-            }
-            handler(ev);
-        }
-    }
-    spdlog::debug("stop thread: netstack reactor");
-}
-
-#elif defined(_WIN32) || defined(_WIN64)
-
-// Windows 后端：用 WSAPoll 做就绪通知（无内核兴趣集，每轮按 interests 重建 pollfd 数组），
-// 用一对自连环回 UDP socket 做跨线程唤醒（替代 Linux eventfd / macOS EVFILT_USER）。
-// 注：与 Linux/macOS 一致，对外仍以 int fd 暴露；SOCKET 句柄在 Windows 上为小整数，转换安全。
-
-static SHORT toWsaEvents(ReactorEvent events) {
-    SHORT ev = 0;
-    if (events & ReactorEvent::READ) {
-        ev |= POLLRDNORM;
-    }
-    if (events & ReactorEvent::WRITE) {
-        ev |= POLLWRNORM;
-    }
-    return ev;
-}
-
-static ReactorEvent fromWsaEvents(SHORT ev) {
-    ReactorEvent events = ReactorEvent::NONE;
-    if (ev & POLLRDNORM) {
-        events = events | ReactorEvent::READ;
-    }
-    if (ev & POLLWRNORM) {
-        events = events | ReactorEvent::WRITE;
-    }
-    if (ev & (POLLERR | POLLHUP | POLLNVAL)) {
-        events = events | ReactorEvent::ERROR;
-    }
-    return events;
-}
-
-Reactor::Reactor() : wakeupRecv(-1), wakeupSend(-1), running(false) {}
-
-Reactor::~Reactor() {
-    stop();
-}
-
-int Reactor::start() {
-    // WSAStartup 引用计数，tun/windows.cc 可能已初始化，这里再调一次安全。
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        spdlog::error("reactor WSAStartup failed: {}", WSAGetLastError());
-        return -1;
-    }
-
-    SOCKET recvSock = ::socket(AF_INET, SOCK_DGRAM, 0);
-    SOCKET sendSock = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (recvSock == INVALID_SOCKET || sendSock == INVALID_SOCKET) {
-        spdlog::error("reactor wakeup socket failed: {}", WSAGetLastError());
-        if (recvSock != INVALID_SOCKET) {
-            ::closesocket(recvSock);
-        }
-        if (sendSock != INVALID_SOCKET) {
-            ::closesocket(sendSock);
-        }
-        WSACleanup();
-        return -1;
-    }
-
-    // recv 端绑定到 127.0.0.1 随机端口，send 端 connect 到该端口形成自连环回。
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    int addrLen = sizeof(addr);
-    if (::bind(recvSock, (struct sockaddr *)&addr, addrLen) != 0 ||
-        ::getsockname(recvSock, (struct sockaddr *)&addr, &addrLen) != 0 ||
-        ::connect(sendSock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        spdlog::error("reactor wakeup loopback setup failed: {}", WSAGetLastError());
-        ::closesocket(recvSock);
-        ::closesocket(sendSock);
-        WSACleanup();
-        return -1;
-    }
-
-    u_long nonBlocking = 1;
-    ::ioctlsocket(recvSock, FIONBIO, &nonBlocking);
-
-    this->wakeupRecv = (int)recvSock;
-    this->wakeupSend = (int)sendSock;
-
-    this->running.store(true);
-    this->thread = std::thread([this] { this->loop(); });
-    return 0;
-}
-
-void Reactor::stop() {
-    if (!this->running.exchange(false)) {
-        if (this->thread.joinable()) {
-            this->thread.join();
-        }
-        return;
-    }
-    wakeup();
-    if (this->thread.joinable()) {
-        this->thread.join();
-    }
-    if (this->wakeupSend >= 0) {
-        ::closesocket((SOCKET)this->wakeupSend);
-        this->wakeupSend = -1;
-    }
-    if (this->wakeupRecv >= 0) {
-        ::closesocket((SOCKET)this->wakeupRecv);
-        this->wakeupRecv = -1;
-    }
-    WSACleanup();
-}
-
-int Reactor::add(int fd, ReactorEvent events, EventHandler handler) {
-    std::unique_lock lock(this->handlerMutex);
-    this->handlers[fd] = std::move(handler);
-    this->interests[fd] = events;
-    return 0;
-}
-
-int Reactor::mod(int fd, ReactorEvent events) {
-    std::unique_lock lock(this->handlerMutex);
-    this->interests[fd] = events;
-    return 0;
-}
-
-int Reactor::del(int fd) {
-    std::unique_lock lock(this->handlerMutex);
-    this->interests.erase(fd);
-    this->handlers.erase(fd);
-    return 0;
-}
-
-void Reactor::post(Task task) {
-    {
-        std::unique_lock lock(this->taskMutex);
-        this->tasks.push(std::move(task));
-    }
-    wakeup();
-}
-
-void Reactor::wakeup() {
-    if (this->wakeupSend < 0) {
-        return;
-    }
-    char one = 1;
-    ::send((SOCKET)this->wakeupSend, &one, 1, 0);
-}
-
-void Reactor::drainWakeup() {
-    char buf[256];
-    while (::recv((SOCKET)this->wakeupRecv, buf, sizeof(buf), 0) > 0) {
-        // 持续读空唤醒 socket，避免残留触发空转。
-    }
-}
-
-void Reactor::drainTasks() {
-    std::queue<Task> pending;
-    {
-        std::unique_lock lock(this->taskMutex);
-        std::swap(pending, this->tasks);
-    }
-    while (!pending.empty()) {
-        pending.front()();
-        pending.pop();
-    }
-}
-
-void Reactor::loop() {
-    spdlog::debug("start thread: netstack reactor");
-    std::vector<WSAPOLLFD> pfds;
-    std::vector<int> fds;
-    while (this->running.load()) {
-        pfds.clear();
-        fds.clear();
-
-        // 唤醒 socket 固定排第一位，只关心可读。
-        WSAPOLLFD wake = {};
-        wake.fd = (SOCKET)this->wakeupRecv;
-        wake.events = POLLRDNORM;
-        pfds.push_back(wake);
-        fds.push_back(this->wakeupRecv);
-
-        // 快照当前兴趣集，构建 pollfd 数组。
-        {
-            std::unique_lock lock(this->handlerMutex);
-            for (const auto &kv : this->interests) {
-                WSAPOLLFD pfd = {};
-                pfd.fd = (SOCKET)kv.first;
-                pfd.events = toWsaEvents(kv.second);
-                pfds.push_back(pfd);
-                fds.push_back(kv.first);
-            }
-        }
-
-        int n = WSAPoll(pfds.data(), (ULONG)pfds.size(), -1);
-        if (n < 0) {
-            int err = WSAGetLastError();
-            if (err == WSAEINTR) {
-                continue;
-            }
-            spdlog::error("reactor WSAPoll failed: {}", err);
-            break;
-        }
-        if (n == 0) {
-            continue;
-        }
-
-        // 先处理唤醒，再分发 fd 事件。
-        if (pfds[0].revents != 0) {
-            drainWakeup();
-            drainTasks();
-        }
-        for (size_t i = 1; i < pfds.size(); ++i) {
-            if (pfds[i].revents == 0) {
-                continue;
-            }
-            int fd = fds[i];
-            EventHandler handler;
-            {
-                std::unique_lock lock(this->handlerMutex);
-                auto it = this->handlers.find(fd);
-                if (it == this->handlers.end()) {
-                    continue;
-                }
-                handler = it->second;
-            }
-            handler(fromWsaEvents(pfds[i].revents));
-        }
-    }
-    spdlog::debug("stop thread: netstack reactor");
-}
-
+// 按平台显式指定 libev 后端，与 cmake/libev.cmake 编入的 EV_USE_* 严格对齐。
+// 不能用 EVFLAG_AUTO：AUTO 会走 ev_recommended_backends()，而该函数在 __APPLE__
+// 下硬编码剔除 KQUEUE 与 POLL（ev.c 注释 "horribly broken"），只留 SELECT；
+// 但我们为缩小风险面把 EV_USE_SELECT 关了，导致 mac 上推荐后端集合为空、
+// ev_loop_new 返回 null（reactor ev_loop_new failed）。
+// reactor 只用后端监听 TCP/UDP socket（utun fd 由 tun 线程单独读写，不进 reactor），
+// 普通 socket 上 kqueue 可靠，故这里显式指定 kqueue 绕过推荐过滤。
+static unsigned int reactorBackendFlags() {
+#if defined(__APPLE__)
+    return EVBACKEND_KQUEUE; // 与 EV_USE_KQUEUE=1 对齐
+#elif defined(__linux__) || defined(__ANDROID__)
+    return EVBACKEND_EPOLL;  // 与 EV_USE_EPOLL=1 对齐（musl 下也走 epoll）
+#elif defined(_WIN32)
+    return EVBACKEND_SELECT; // 与 EV_USE_SELECT=1 / EV_SELECT_IS_WINSOCKET 对齐
 #else
-
-Reactor::Reactor() : epollFd(-1), wakeupFd(-1), running(false) {}
-
-Reactor::~Reactor() {
-    stop();
+    return EVFLAG_AUTO;
+#endif
 }
 
 int Reactor::start() {
-    spdlog::error("reactor not implemented on this platform yet");
-    return -1;
+    // 独立事件循环（不使用默认 loop，避免与进程内其他 libev 使用者冲突）。
+    this->evLoop = ev_loop_new(reactorBackendFlags());
+    if (this->evLoop == nullptr) {
+        spdlog::error("reactor ev_loop_new failed");
+        return -1;
+    }
+
+    // ev_async：唯一可跨线程安全触发的 watcher，用作 post() 的唤醒通道。
+    ev_async *async = new ev_async();
+    ev_async_init(async, &Reactor::asyncCallback);
+    async->data = this;
+    ev_async_start(this->evLoop, async);
+    this->asyncWatcher = async;
+
+    this->running.store(true);
+    this->thread = std::thread([this] { this->loop(); });
+    // 在启动线程内确定性记录 reactor 线程 id（早于任何跨线程 add/mod/del 访问），
+    // 避免在 loop() 内写、其他线程读 loopThreadId 造成的数据竞争。
+    this->loopThreadId = this->thread.get_id();
+    return 0;
 }
 
-void Reactor::stop() {}
+void Reactor::stop() {
+    if (!this->running.exchange(false)) {
+        if (this->thread.joinable()) {
+            this->thread.join();
+        }
+        return;
+    }
+    // 唤醒 reactor 线程，async 回调里检测到 !running 会 ev_break 退出 ev_run。
+    if (this->asyncWatcher != nullptr) {
+        ev_async_send(this->evLoop, (ev_async *)this->asyncWatcher);
+    }
+    if (this->thread.joinable()) {
+        this->thread.join();
+    }
 
-int Reactor::add(int, ReactorEvent, EventHandler) {
-    return -1;
+    // 线程已退出，安全清理剩余 watcher 与 loop（仅本线程访问）。
+    for (auto &kv : this->ioWatchers) {
+        IoWatcher *iw = (IoWatcher *)kv.second;
+        ev_io_stop(this->evLoop, &iw->io);
+        delete iw;
+    }
+    this->ioWatchers.clear();
+
+    if (this->asyncWatcher != nullptr) {
+        ev_async_stop(this->evLoop, (ev_async *)this->asyncWatcher);
+        delete (ev_async *)this->asyncWatcher;
+        this->asyncWatcher = nullptr;
+    }
+    if (this->evLoop != nullptr) {
+        ev_loop_destroy(this->evLoop);
+        this->evLoop = nullptr;
+    }
 }
 
-int Reactor::mod(int, ReactorEvent) {
-    return -1;
+bool Reactor::onLoopThread() const {
+    return std::this_thread::get_id() == this->loopThreadId;
 }
 
-int Reactor::del(int) {
-    return -1;
+// ===================== 对外接口：按线程归属直接应用或投递 =====================
+
+int Reactor::add(int fd, ReactorEvent events, EventHandler handler) {
+    if (onLoopThread()) {
+        applyAdd(fd, events, std::move(handler));
+    } else {
+        auto h = std::make_shared<EventHandler>(std::move(handler));
+        post([this, fd, events, h] { this->applyAdd(fd, events, std::move(*h)); });
+    }
+    return 0;
 }
 
-void Reactor::post(Task) {}
+int Reactor::mod(int fd, ReactorEvent events) {
+    if (onLoopThread()) {
+        applyMod(fd, events);
+    } else {
+        post([this, fd, events] { this->applyMod(fd, events); });
+    }
+    return 0;
+}
 
-void Reactor::loop() {}
+int Reactor::del(int fd) {
+    if (onLoopThread()) {
+        applyDel(fd);
+    } else {
+        post([this, fd] { this->applyDel(fd); });
+    }
+    return 0;
+}
 
-void Reactor::wakeup() {}
+// ===================== 仅 reactor 线程：实际操作 libev watcher =====================
 
-void Reactor::drainTasks() {}
+void Reactor::applyAdd(int fd, ReactorEvent events, EventHandler handler) {
+    auto it = this->ioWatchers.find(fd);
+    if (it != this->ioWatchers.end()) {
+        // 已存在：等价于替换 handler 与兴趣集（防御性，正常不应发生）。
+        IoWatcher *iw = (IoWatcher *)it->second;
+        ev_io_stop(this->evLoop, &iw->io);
+        iw->handler = std::move(handler);
+        iw->events = events;
+        ev_io_set(&iw->io, fd, toEvEvents(events));
+        ev_io_start(this->evLoop, &iw->io);
+        return;
+    }
+    IoWatcher *iw = new IoWatcher();
+    iw->fd = fd;
+    iw->reactor = this;
+    iw->handler = std::move(handler);
+    iw->events = events;
+    iw->io.data = iw;
+    ev_io_init(&iw->io, &Reactor::ioCallback, fd, toEvEvents(events));
+    ev_io_start(this->evLoop, &iw->io);
+    this->ioWatchers[fd] = iw;
+}
 
-void Reactor::drainWakeup() {}
+void Reactor::applyMod(int fd, ReactorEvent events) {
+    auto it = this->ioWatchers.find(fd);
+    if (it == this->ioWatchers.end()) {
+        return;
+    }
+    IoWatcher *iw = (IoWatcher *)it->second;
+    if (iw->events == events) {
+        return;
+    }
+    // libev 不允许修改运行中的 watcher，需 stop -> set -> start。
+    ev_io_stop(this->evLoop, &iw->io);
+    iw->events = events;
+    ev_io_set(&iw->io, fd, toEvEvents(events));
+    ev_io_start(this->evLoop, &iw->io);
+}
 
-#endif
+void Reactor::applyDel(int fd) {
+    auto it = this->ioWatchers.find(fd);
+    if (it == this->ioWatchers.end()) {
+        return;
+    }
+    IoWatcher *iw = (IoWatcher *)it->second;
+    ev_io_stop(this->evLoop, &iw->io);
+    this->ioWatchers.erase(it);
+    delete iw;
+}
+
+// ===================== 跨线程任务投递 =====================
+
+void Reactor::post(Task task) {
+    {
+        std::unique_lock lock(this->taskMutex);
+        this->tasks.push(std::move(task));
+    }
+    if (this->asyncWatcher != nullptr) {
+        ev_async_send(this->evLoop, (ev_async *)this->asyncWatcher);
+    }
+}
+
+void Reactor::drainTasks() {
+    // swap 批量取出，持锁时间极短；锁外执行，允许 task 内再次 post（不会自死锁）。
+    std::queue<Task> pending;
+    {
+        std::unique_lock lock(this->taskMutex);
+        std::swap(pending, this->tasks);
+    }
+    while (!pending.empty()) {
+        pending.front()();
+        pending.pop();
+    }
+}
+
+// ===================== libev 回调跳板 =====================
+
+void Reactor::ioCallback(struct ev_loop *, struct ev_io *w, int revents) {
+    IoWatcher *iw = (IoWatcher *)w->data;
+    // 关键：先把 handler 拷贝到局部，再调用。handler 内部可能 del(fd) 释放本 IoWatcher，
+    // 拷贝后调用可避免 use-after-free；回调返回前不再触碰 iw。
+    Reactor::EventHandler handler = iw->handler;
+    handler(fromEvEvents(revents));
+}
+
+void Reactor::asyncCallback(struct ev_loop *loop, struct ev_async *w, int) {
+    Reactor *self = (Reactor *)w->data;
+    self->drainTasks();
+    if (!self->running.load()) {
+        ev_break(loop, EVBREAK_ALL);
+    }
+}
+
+void Reactor::loop() {
+    spdlog::debug("start thread: netstack reactor");
+    ev_run(this->evLoop, 0);
+    spdlog::debug("stop thread: netstack reactor");
+}
 
 } // namespace candy

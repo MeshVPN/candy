@@ -34,3 +34,4 @@
 # CMake Build files
 .cache
 build
+build-mac
