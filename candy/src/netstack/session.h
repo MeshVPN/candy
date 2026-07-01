@@ -9,8 +9,7 @@ namespace candy {
 
 class NetStack;
 
-// Session 基类：会话生命周期的公共抽象。
-// 阶段一仅有 TCP 会话；UDP/ICMP 会话在阶段二加入。
+// Session 基类：会话生命周期的公共抽象，派生出 TCP/UDP 两类会话。
 class Session {
 public:
     explicit Session(NetStack *stack);

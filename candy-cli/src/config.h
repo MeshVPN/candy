@@ -32,9 +32,6 @@ private:
     int routeCost = 0;
     int mtu = 1400;
     std::string forwardMode = "kernel";
-    // 阶段三：外部 socks5 上游与分流规则（仅 userspace 模式有效，空表示全部 direct）。
-    std::string socks5Upstream;
-    std::string outboundRules;
 };
 
 int saveTunAddress(const std::string &name, const std::string &cidr);
