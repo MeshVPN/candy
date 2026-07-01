@@ -29,8 +29,7 @@ int DirectOutbound::dialTcp(const Endpoint &dst) {
 
     int ret = ::connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     if (ret != 0 && !netInProgress(netLastError())) {
-        spdlog::warn("direct outbound tcp connect {}:{} failed: {}", dst.host.toString(), dst.port,
-                     netErrStr(netLastError()));
+        spdlog::warn("direct outbound tcp connect {}:{} failed: {}", dst.host.toString(), dst.port, netErrStr(netLastError()));
         netClose(fd);
         return -1;
     }
@@ -56,8 +55,7 @@ int DirectOutbound::dialUdp(const Endpoint &dst) {
     addr.sin_port = htons(dst.port);
     addr.sin_addr.s_addr = uint32_t(dst.host);
     if (::connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        spdlog::warn("direct outbound udp connect {}:{} failed: {}", dst.host.toString(), dst.port,
-                     netErrStr(netLastError()));
+        spdlog::warn("direct outbound udp connect {}:{} failed: {}", dst.host.toString(), dst.port, netErrStr(netLastError()));
         netClose(fd);
         return -1;
     }

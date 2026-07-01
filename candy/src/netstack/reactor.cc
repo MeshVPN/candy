@@ -57,7 +57,7 @@ static unsigned int reactorBackendFlags() {
 #if defined(__APPLE__)
     return EVBACKEND_KQUEUE; // 与 EV_USE_KQUEUE=1 对齐
 #elif defined(__linux__) || defined(__ANDROID__)
-    return EVBACKEND_EPOLL;  // 与 EV_USE_EPOLL=1 对齐（musl 下也走 epoll）
+    return EVBACKEND_EPOLL; // 与 EV_USE_EPOLL=1 对齐（musl 下也走 epoll）
 #elif defined(_WIN32)
     return EVBACKEND_SELECT; // 与 EV_USE_SELECT=1 / EV_SELECT_IS_WINSOCKET 对齐
 #else

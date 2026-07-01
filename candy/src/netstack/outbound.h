@@ -32,18 +32,24 @@ public:
 
     // L4 终结型出站：为一条已终结的 TCP 流建立落地通道，返回已发起 connect 的非阻塞
     // fd（EINPROGRESS 视为成功），失败返回 -1。默认不支持。
-    virtual int dialTcp(const Endpoint &dst) { return -1; }
+    virtual int dialTcp(const Endpoint &dst) {
+        return -1;
+    }
 
     // L4 终结型出站：为一条已终结的 UDP 流建立 connect 到目的的非阻塞 fd，失败返回 -1。
     // 默认不支持。
-    virtual int dialUdp(const Endpoint &dst) { return -1; }
+    virtual int dialUdp(const Endpoint &dst) {
+        return -1;
+    }
 };
 
 // DirectOutbound：内核 socket 直连落地。
 // 源地址由内核在发起连接时自动填为本网关出口 IP，等价 MASQUERADE。
 class DirectOutbound : public Outbound {
 public:
-    std::string name() const override { return "direct"; }
+    std::string name() const override {
+        return "direct";
+    }
 
     int dialTcp(const Endpoint &dst) override;
     int dialUdp(const Endpoint &dst) override;
