@@ -5,7 +5,6 @@
 #include "core/net.h"
 #include "netstack/outbound.h"
 #include "netstack/reactor.h"
-#include "netstack/router.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -28,7 +27,6 @@ namespace candy {
 class Client;
 class SessionTcp;
 class SessionUdp;
-class SessionIcmp;
 
 // NetStack：独占 lwIP（NO_SYS=1 单线程 raw API）的模块。
 // 持有一个 NetStack 线程驱动 lwIP 收发与定时器，一个 Reactor 线程管理落地 fd。
@@ -42,19 +40,14 @@ public:
     int wait();
     void shutdown();
 
-    // 阶段三：在 run() 之前注入 socks5 上游与分流规则（解析配置串，构建 Router + 出站注册表）。
-    // 入参为空时不建任何规则/socks5，getOutbound 恒返回 direct，行为与阶段一/二完全一致。
-    void configureOutbounds(const std::string &socks5Upstream, const std::string &outboundRules);
-
     // 把待终结的 IP 包投递给 NetStack（来自 tun 落地分支，含 IPIP 外层）。
     void input(std::string packet);
 
     // 供 Session 使用：在 NetStack 线程内执行任务（保证 lwIP API 线程安全）。
     void postToStack(std::function<void()> task);
     Reactor &getReactor();
-    // 按流选择出站：Router.match(flow) 命中的 outbound（direct / socks5）。
-    // 无规则或命中 direct 时返回 DirectOutbound（与阶段一/二行为完全一致）。
-    Outbound &getOutbound(const Router::FlowKey &flow);
+    // 落地拨号出站：当前仅支持内核 socket 直连（DirectOutbound）。
+    Outbound &getOutbound();
     // UDP 回包注入用：拿到本模块的 lwIP netif（仅 NetStack 线程使用）。
     struct netif &getNetif();
 
@@ -65,8 +58,6 @@ public:
     void removeSession(struct tcp_pcb *pcb);
     // UDP 伪会话结束时从 UDP 会话表移除（按四元组 key）。仅 NetStack 线程调用。
     void removeUdpSession(const std::string &key);
-    // ICMP 伪会话结束时从 ICMP 会话表移除（按 key）。仅 NetStack 线程调用。
-    void removeIcmpSession(const std::string &key);
 
     Client *getClient();
 
@@ -76,13 +67,8 @@ private:
     void loop();
     void handleInput(std::string packet);
     void feedToLwip(const std::string &innerPacket, IP4 vnetPeer);
-    // ICMP echo 在入栈前拦截：lwIP 的 PRETEND netif 只接受 TCP/UDP，ICMP 单独落地。
-    // 返回 true 表示已被 ICMP 处理（不再喂 lwIP）。仅 NetStack 线程。
-    bool handleIcmp(const std::string &innerPacket, IP4 vnetPeer);
     // UDP 伪会话空闲超时回收（仅 NetStack 线程，loop 中节流调用）。
     void reapIdleUdpSessions();
-    // ICMP 伪会话空闲超时回收（仅 NetStack 线程，loop 中节流调用）。
-    void reapIdleIcmpSessions();
 
     // lwIP 回调跳板
     static err_t netifInitTrampoline(struct netif *netif);
@@ -109,15 +95,8 @@ private:
 
     Reactor reactor;
 
-    // 落地出站：DirectOutbound（内核 socket 直连）恒在；阶段三再按 Router 规则选 socks5。
-    // 无规则时 getOutbound 恒返回 directOutbound，保证现有 kernel/userspace 行为不变。
+    // 落地出站：DirectOutbound（内核 socket 直连）。userspace 局域网组网的落地方式。
     DirectOutbound directOutbound;
-    // 阶段三：分流规则引擎（空规则时 match 恒返回 "direct"）。
-    Router router;
-    // 命名出站注册表：name -> Socks5Outbound（由 configureOutbounds 从配置构建）。
-    // direct 不入表（直接用 directOutbound）。仅在 run() 前 configureOutbounds 中写入，
-    // 之后只读，故无需加锁。
-    std::unordered_map<std::string, std::unique_ptr<Outbound>> outbounds;
 
     // NetStack 线程任务队列（用带超时读驱动定时器）
     std::mutex stackTaskMutex;
@@ -137,8 +116,6 @@ private:
     std::unordered_map<struct tcp_pcb *, std::shared_ptr<SessionTcp>> sessions;
     // UDP 伪会话表：四元组 key -> SessionUdp。仅 NetStack 线程访问，无需加锁。
     std::unordered_map<std::string, std::shared_ptr<SessionUdp>> udpSessions;
-    // ICMP 伪会话表：(源,目的,icmpId) key -> SessionIcmp。仅 NetStack 线程访问，无需加锁。
-    std::unordered_map<std::string, std::shared_ptr<SessionIcmp>> icmpSessions;
 };
 
 } // namespace candy
