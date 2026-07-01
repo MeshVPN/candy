@@ -32,8 +32,6 @@ Poco::JSON::Object arguments::json() {
         config.set("vmac", virtualMac(this->name));
         config.set("expt", loadTunAddress(this->name));
         config.set("forward-mode", this->forwardMode);
-        config.set("socks5-upstream", this->socks5Upstream);
-        config.set("outbound-rules", this->outboundRules);
     }
 
     if (this->mode == "server") {
@@ -62,8 +60,6 @@ int arguments::parse(int argc, char *argv[]) {
     program.add_argument("--discovery").help("discovery interval").scan<'i', int>();
     program.add_argument("--localhost").help("local ip");
     program.add_argument("--forward-mode").help("packet forward mode: kernel or userspace");
-    program.add_argument("--socks5-upstream").help("external socks5 upstream: name=socks5://host:port;...");
-    program.add_argument("--outbound-rules").help("outbound split rules: dst-cidr:.. => name;...");
 
     program.add_argument("--no-timestamp").implicit_value(true);
     program.add_argument("--debug").implicit_value(true);
@@ -94,8 +90,6 @@ int arguments::parse(int argc, char *argv[]) {
         program.set_if_used("--discovery", this->discovery);
         program.set_if_used("--route", this->routeCost);
         program.set_if_used("--forward-mode", this->forwardMode);
-        program.set_if_used("--socks5-upstream", this->socks5Upstream);
-        program.set_if_used("--outbound-rules", this->outboundRules);
 
         bool needShowUsage = [&]() {
             if (this->mode != "client" && this->mode != "server")
@@ -142,8 +136,6 @@ void arguments::parseFile(std::string cfgFile) {
             {"mtu", [&](const std::string &value) { this->mtu = std::stoi(value); }},
             {"localhost", [&](const std::string &value) { this->localhost = value; }},
             {"forward-mode", [&](const std::string &value) { this->forwardMode = value; }},
-            {"socks5-upstream", [&](const std::string &value) { this->socks5Upstream = value; }},
-            {"outbound-rules", [&](const std::string &value) { this->outboundRules = value; }},
         };
         auto trim = [](std::string str) {
             if (str.length() >= 2 && str.front() == '\"' && str.back() == '\"') {
