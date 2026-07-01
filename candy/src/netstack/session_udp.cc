@@ -17,10 +17,9 @@
 
 namespace candy {
 
-SessionUdp::SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort, IP4 origDst,
-                       uint16_t origDstPort)
-    : Session(stack), pcb(pcb), fd(-1), origSrc(origSrc), origSrcPort(origSrcPort), origDst(origDst),
-      origDstPort(origDstPort), lastActiveTs(std::chrono::steady_clock::now()) {
+SessionUdp::SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort, IP4 origDst, uint16_t origDstPort)
+    : Session(stack), pcb(pcb), fd(-1), origSrc(origSrc), origSrcPort(origSrcPort), origDst(origDst), origDstPort(origDstPort),
+      lastActiveTs(std::chrono::steady_clock::now()) {
     // 四元组 key：源IP:源端口 -> 目的IP:目的端口
     this->sessionKey.assign((const char *)&origSrc, sizeof(uint32_t));
     this->sessionKey.append((const char *)&origSrcPort, sizeof(origSrcPort));

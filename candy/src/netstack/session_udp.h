@@ -29,8 +29,7 @@ class SessionUdp : public Session, public std::enable_shared_from_this<SessionUd
 public:
     // pcb：lwIP 为该四元组克隆出的已 connect 的 udp_pcb（NetStack 线程持有）。
     // origSrc/origSrcPort：源端(dev1)；origDst/origDstPort：落地目的(dev2 服务)。
-    SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort, IP4 origDst,
-               uint16_t origDstPort);
+    SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort, IP4 origDst, uint16_t origDstPort);
     ~SessionUdp() override;
 
     int start() override;
@@ -42,10 +41,14 @@ public:
     void sendToLanding(std::string data);
 
     // 该会话的四元组 key（NetStack 线程的会话表用）。
-    const std::string &key() const { return this->sessionKey; }
+    const std::string &key() const {
+        return this->sessionKey;
+    }
 
     // 最近活跃时间（用于空闲超时回收，仅 NetStack 线程访问）。
-    std::chrono::steady_clock::time_point lastActive() const { return this->lastActiveTs; }
+    std::chrono::steady_clock::time_point lastActive() const {
+        return this->lastActiveTs;
+    }
 
     // lwIP 每流 recv 跳板：克隆出的 npcb 后续同流数据报都走这里（仅 NetStack 线程）。
     static void recvTrampoline(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port);

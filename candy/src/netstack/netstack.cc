@@ -376,8 +376,8 @@ err_t NetStack::onOutput(struct netif *netif, struct pbuf *p, const ip4_addr_t *
     pbuf_copy_partial(p, buffer.data(), p->tot_len, 0);
     if (buffer.size() >= sizeof(IP4Header)) {
         IP4Header *h = (IP4Header *)buffer.data();
-        spdlog::debug("netstack onOutput: {} -> {} proto={} len={}", h->saddr.toString(), h->daddr.toString(),
-                      (int)h->protocol, buffer.size());
+        spdlog::debug("netstack onOutput: {} -> {} proto={} len={}", h->saddr.toString(), h->daddr.toString(), (int)h->protocol,
+                      buffer.size());
     }
     output(buffer);
     return ERR_OK;
@@ -424,8 +424,7 @@ void NetStack::onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *a
     std::memcpy(&origSrc, &ip_2_ip4(&pcb->remote_ip)->addr, sizeof(uint32_t));
     uint16_t origSrcPort = pcb->remote_port;
 
-    spdlog::debug("netstack onUdpRecv: {}:{} -> {}:{}", origSrc.toString(), origSrcPort, origDst.toString(),
-                  origDstPort);
+    spdlog::debug("netstack onUdpRecv: {}:{} -> {}:{}", origSrc.toString(), origSrcPort, origDst.toString(), origDstPort);
 
     auto session = std::make_shared<SessionUdp>(this, pcb, origSrc, origSrcPort, origDst, origDstPort);
     if (session->start()) {
