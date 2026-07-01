@@ -99,8 +99,6 @@ bool run(const std::string &id, const Poco::JSON::Object &config) {
         client->setPort(config.getValue<int>("port"));
         client->setLocalhost(config.getValue<std::string>("localhost"));
         client->setForwardMode(config.optValue<std::string>("forward-mode", "kernel"));
-        client->setSocks5Upstream(config.optValue<std::string>("socks5-upstream", ""));
-        client->setOutboundRules(config.optValue<std::string>("outbound-rules", ""));
         client->run();
     }
     spdlog::info("run exit: id={} ", id);

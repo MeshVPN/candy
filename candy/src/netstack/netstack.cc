@@ -2,14 +2,12 @@
 #include "netstack/netstack.h"
 #include "core/client.h"
 #include "core/message.h"
-#include "netstack/session_icmp.h"
 #include "netstack/session_tcp.h"
 #include "netstack/session_udp.h"
 #include <chrono>
 #include <cstring>
 #include <mutex>
 #include <spdlog/spdlog.h>
-#include <sstream>
 #include <vector>
 
 #include "lwip/init.h"
@@ -21,153 +19,6 @@
 #include "netif/etharp.h"
 
 namespace candy {
-
-namespace {
-
-// 去除字符串首尾空白（含 \r，兼容 CRLF 配置文件）。
-std::string trimWs(const std::string &s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) {
-        return "";
-    }
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
-}
-
-// 按分隔符切分并去空白，丢弃空片段。
-std::vector<std::string> splitTrim(const std::string &s, char sep) {
-    std::vector<std::string> out;
-    std::string cur;
-    std::istringstream iss(s);
-    while (std::getline(iss, cur, sep)) {
-        std::string t = trimWs(cur);
-        if (!t.empty()) {
-            out.push_back(t);
-        }
-    }
-    return out;
-}
-
-// 解析单条 socks5 上游："socks5://[user:pass@]host:port"。成功返回 true。
-bool parseSocks5Url(const std::string &url, Endpoint &server, std::string &user, std::string &pass) {
-    const std::string scheme = "socks5://";
-    if (url.compare(0, scheme.size(), scheme) != 0) {
-        return false;
-    }
-    std::string rest = url.substr(scheme.size());
-    // 可选 user:pass@
-    auto at = rest.find('@');
-    if (at != std::string::npos) {
-        std::string cred = rest.substr(0, at);
-        rest = rest.substr(at + 1);
-        auto colon = cred.find(':');
-        if (colon == std::string::npos) {
-            return false;
-        }
-        user = cred.substr(0, colon);
-        pass = cred.substr(colon + 1);
-    }
-    // host:port
-    auto colon = rest.rfind(':');
-    if (colon == std::string::npos) {
-        return false;
-    }
-    std::string host = rest.substr(0, colon);
-    std::string portStr = rest.substr(colon + 1);
-    int port = 0;
-    try {
-        port = std::stoi(portStr);
-    } catch (...) {
-        return false;
-    }
-    if (port <= 0 || port > 65535) {
-        return false;
-    }
-    server.host = IP4(host);
-    server.port = (uint16_t)port;
-    return true;
-}
-
-} // namespace
-
-void NetStack::configureOutbounds(const std::string &socks5Upstream, const std::string &outboundRules) {
-    // 空配置：不建任何 socks5/规则，getOutbound 恒返回 direct，行为完全等价阶段一/二。
-    if (trimWs(socks5Upstream).empty() && trimWs(outboundRules).empty()) {
-        return;
-    }
-
-    // 1) 解析 socks5 上游："name=socks5://[user:pass@]host:port;..."
-    for (const auto &item : splitTrim(socks5Upstream, ';')) {
-        auto eq = item.find('=');
-        if (eq == std::string::npos) {
-            spdlog::warn("netstack: bad socks5-upstream entry: {}", item);
-            continue;
-        }
-        std::string name = trimWs(item.substr(0, eq));
-        std::string url = trimWs(item.substr(eq + 1));
-        Endpoint server{};
-        std::string user, pass;
-        if (name.empty() || !parseSocks5Url(url, server, user, pass)) {
-            spdlog::warn("netstack: bad socks5-upstream url: {}", item);
-            continue;
-        }
-        this->outbounds[name] = std::make_unique<Socks5Outbound>(server, user, pass);
-        spdlog::info("netstack: socks5 outbound '{}' -> {}:{}", name, server.host.toString(), server.port);
-    }
-
-    // 2) 解析分流规则："dst-cidr:CIDR => name; dst-port:PORT => name; default => name;"
-    //    自上而下即匹配优先级，与 03 文档 §5.1 一致。
-    for (const auto &line : splitTrim(outboundRules, ';')) {
-        auto arrow = line.find("=>");
-        if (arrow == std::string::npos) {
-            spdlog::warn("netstack: bad outbound-rule (no =>): {}", line);
-            continue;
-        }
-        std::string cond = trimWs(line.substr(0, arrow));
-        std::string target = trimWs(line.substr(arrow + 2));
-        if (target.empty()) {
-            spdlog::warn("netstack: bad outbound-rule (empty target): {}", line);
-            continue;
-        }
-        Router::Rule rule{};
-        rule.outbound = target;
-        if (cond == "default") {
-            this->router.setDefault(target);
-            spdlog::info("netstack: rule default => {}", target);
-            continue;
-        }
-        const std::string cidrPfx = "dst-cidr:";
-        const std::string portPfx = "dst-port:";
-        if (cond.compare(0, cidrPfx.size(), cidrPfx) == 0) {
-            std::string cidr = trimWs(cond.substr(cidrPfx.size()));
-            Address addr;
-            if (addr.fromCidr(cidr)) {
-                spdlog::warn("netstack: bad dst-cidr: {}", cidr);
-                continue;
-            }
-            rule.type = Router::MatchType::DstCidr;
-            rule.cidr = addr.Host();
-            rule.mask = addr.Mask();
-            this->router.addRule(rule);
-            spdlog::info("netstack: rule dst-cidr:{} => {}", cidr, target);
-        } else if (cond.compare(0, portPfx.size(), portPfx) == 0) {
-            std::string portStr = trimWs(cond.substr(portPfx.size()));
-            int port = 0;
-            try {
-                port = std::stoi(portStr);
-            } catch (...) {
-                spdlog::warn("netstack: bad dst-port: {}", portStr);
-                continue;
-            }
-            rule.type = Router::MatchType::DstPort;
-            rule.port = (uint16_t)port;
-            this->router.addRule(rule);
-            spdlog::info("netstack: rule dst-port:{} => {}", port, target);
-        } else {
-            spdlog::warn("netstack: unsupported rule condition: {}", cond);
-        }
-    }
-}
 
 NetStack::NetStack() : client(nullptr), running(false), listenPcb(nullptr), udpListenPcb(nullptr) {
     std::memset(&this->lwipNetif, 0, sizeof(this->lwipNetif));
@@ -186,18 +37,8 @@ Reactor &NetStack::getReactor() {
     return this->reactor;
 }
 
-Outbound &NetStack::getOutbound(const Router::FlowKey &flow) {
-    // 无规则时 router.match 恒返回兜底 "direct"，直接复用 directOutbound，零回归。
-    const std::string name = this->router.match(flow);
-    if (name == "direct" || name.empty()) {
-        return this->directOutbound;
-    }
-    auto it = this->outbounds.find(name);
-    if (it != this->outbounds.end() && it->second) {
-        return *it->second;
-    }
-    // 命中了一个未注册的出站名（配置不一致），安全兜底回 direct，避免丢流。
-    spdlog::warn("netstack: outbound '{}' not found, fallback to direct", name);
+Outbound &NetStack::getOutbound() {
+    // 当前仅支持内核 socket 直连落地。
     return this->directOutbound;
 }
 
@@ -338,13 +179,6 @@ void NetStack::teardownStack() {
         }
     }
     this->udpSessions.clear();
-    // ICMP 伪会话同理清理。
-    for (auto &kv : this->icmpSessions) {
-        if (kv.second) {
-            kv.second->shutdownFromStack();
-        }
-    }
-    this->icmpSessions.clear();
     {
         std::unique_lock lock(this->peerMapMutex);
         this->vnetPeerMap.clear();
@@ -380,11 +214,10 @@ void NetStack::loop() {
         }
         sys_check_timeouts();
 
-        // 节流：每 10s 扫描一次 UDP/ICMP 伪会话，回收空闲超时项。
+        // 节流：每 10s 扫描一次 UDP 伪会话，回收空闲超时项。
         auto now = std::chrono::steady_clock::now();
         if (now - lastReap >= std::chrono::seconds(10)) {
             reapIdleUdpSessions();
-            reapIdleIcmpSessions();
             lastReap = now;
         }
     }
@@ -411,27 +244,6 @@ void NetStack::reapIdleUdpSessions() {
     }
 }
 
-void NetStack::reapIdleIcmpSessions() {
-    // 仅 NetStack 线程访问 icmpSessions，无需加锁。
-    // ICMP echo 间隔通常 1s：30s 无活动判定空闲，强制关闭并移除。
-    // shutdownFromStack 仅置 closing 并交 reactor 关 fd，不修改 icmpSessions，
-    // 故可安全地在遍历后统一 erase。
-    auto now = std::chrono::steady_clock::now();
-    int reaped = 0;
-    for (auto it = this->icmpSessions.begin(); it != this->icmpSessions.end();) {
-        if (it->second && now - it->second->lastActive() > std::chrono::seconds(30)) {
-            it->second->shutdownFromStack();
-            it = this->icmpSessions.erase(it);
-            ++reaped;
-        } else {
-            ++it;
-        }
-    }
-    if (reaped > 0) {
-        spdlog::debug("netstack reap idle icmp sessions: {} reaped, {} remain", reaped, this->icmpSessions.size());
-    }
-}
-
 void NetStack::handleInput(std::string packet) {
     if (packet.size() < sizeof(IP4Header)) {
         return;
@@ -448,11 +260,10 @@ void NetStack::handleInput(std::string packet) {
     IP4Header *inner = (IP4Header *)packet.data();
     spdlog::debug("netstack input: vnetPeer={} {} -> {} proto={}", vnetPeer.toString(), inner->saddr.toString(),
                   inner->daddr.toString(), (int)inner->protocol);
-    // ICMP 不走 lwIP（PRETEND netif 仅接受 TCP/UDP），在入栈前拦截并独立落地。
-    if (inner->protocol == 0x01) {
-        if (handleIcmp(packet, vnetPeer)) {
-            return;
-        }
+    // 本次增量发版仅支持 userspace TCP/UDP 组网：非 TCP(0x06)/UDP(0x11) 一律丢弃
+    // （ICMP 等待后续迭代再支持；PRETEND netif 本也只接受 TCP/UDP）。
+    if (inner->protocol != 0x06 && inner->protocol != 0x11) {
+        return;
     }
     feedToLwip(packet, vnetPeer);
 }
@@ -486,56 +297,6 @@ void NetStack::feedToLwip(const std::string &innerPacket, IP4 vnetPeer) {
         spdlog::warn("netstack netif.input failed: {}", (int)e);
         pbuf_free(p);
     }
-}
-
-bool NetStack::handleIcmp(const std::string &innerPacket, IP4 vnetPeer) {
-    // 仅处理 ICMP echo request(type 8)：建立/复用伪会话，用内核 ICMP socket 落地。
-    // 其余 ICMP（差错类等）暂不处理，返回 false 交回默认丢弃（不喂 lwIP）。
-    IP4Header *ip = (IP4Header *)innerPacket.data();
-    size_t ihl = (ip->version_ihl & 0x0f) * 4;
-    if (innerPacket.size() < ihl + 8) {
-        return false;
-    }
-    const uint8_t *icmp = (const uint8_t *)innerPacket.data() + ihl;
-    uint8_t type = icmp[0];
-    if (type != 8) { // 仅 echo request
-        return false;
-    }
-    uint16_t icmpId = ((uint16_t)icmp[4] << 8) | icmp[5];
-
-    IP4 origSrc = ip->saddr;
-    IP4 origDst = ip->daddr;
-
-    // 记录回包寻址：origSrc(dev1) -> vnetPeer(源网关虚拟IP)，供 reply 经 output 回送。
-    if (!vnetPeer.empty()) {
-        auto now = std::chrono::steady_clock::now();
-        std::unique_lock lock(this->peerMapMutex);
-        this->vnetPeerMap[uint32_t(origSrc)] = PeerEntry{vnetPeer, now};
-    }
-
-    // key：(源,目的,icmpId)。复用已有会话或新建。
-    std::string key;
-    key.assign((const char *)&origSrc, sizeof(uint32_t));
-    key.append((const char *)&origDst, sizeof(uint32_t));
-    key.append((const char *)&icmpId, sizeof(icmpId));
-
-    std::shared_ptr<SessionIcmp> session;
-    auto sit = this->icmpSessions.find(key);
-    if (sit != this->icmpSessions.end()) {
-        session = sit->second;
-    } else {
-        session = std::make_shared<SessionIcmp>(this, origSrc, origDst, icmpId);
-        if (session->start()) {
-            spdlog::debug("netstack icmp session start failed: {} -> {}", origSrc.toString(), origDst.toString());
-            return true; // 已消费（落地失败也不喂 lwIP）
-        }
-        this->icmpSessions[key] = session;
-    }
-
-    spdlog::debug("netstack handleIcmp: {} -> {} id={}", origSrc.toString(), origDst.toString(), icmpId);
-    // 把完整 ICMP 报文（含头与 payload）交给会话落地发送。
-    session->sendEcho(innerPacket.substr(ihl));
-    return true;
 }
 
 void NetStack::output(const std::string &innerPacket) {
@@ -575,11 +336,6 @@ void NetStack::removeSession(struct tcp_pcb *pcb) {
 void NetStack::removeUdpSession(const std::string &key) {
     // 仅 NetStack 线程调用，udpSessions 无需加锁。
     this->udpSessions.erase(key);
-}
-
-void NetStack::removeIcmpSession(const std::string &key) {
-    // 仅 NetStack 线程调用，icmpSessions 无需加锁。
-    this->icmpSessions.erase(key);
 }
 
 struct netif &NetStack::getNetif() {

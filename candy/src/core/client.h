@@ -44,9 +44,6 @@ public:
     void setVirtualMac(const std::string &vmac);
 
     void setForwardMode(const std::string &mode);
-    // 阶段三：外部 socks5 上游与分流规则（仅 userspace 模式生效，空表示全部 direct）。
-    void setSocks5Upstream(const std::string &upstream);
-    void setOutboundRules(const std::string &rules);
 
     void run();
     bool isRunning();
@@ -79,8 +76,6 @@ private:
 private:
     std::string tunName;
     std::string forwardMode = "kernel";
-    std::string socks5Upstream;
-    std::string outboundRules;
     int mtu = 1400;
 };
 
