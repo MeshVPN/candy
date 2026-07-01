@@ -1,5 +1,6 @@
 # libev：事件循环库（reactor 后端，一份代码全平台）。
-# 采用 vendored 源码编译（third_party/libev），不依赖系统库，保证三平台开箱即用。
+# 依赖自定义 fork（Bepartofyou/libev），通过 FetchContent 拉取，不再在仓库内 vendored 源码，
+# 也不依赖系统库，保证三平台开箱即用。
 #
 # libev 的源码组织很特殊：只需编译 ev.c 一个翻译单元，它在内部按宏条件
 # #include 具体后端（ev_epoll.c / ev_kqueue.c / ev_select.c 等）。因此这里
@@ -12,7 +13,22 @@
 #   2. EV_STANDALONE 下 kqueue 默认关闭（EV_USE_KQUEUE 默认 0），故 macOS 必须显式 EV_USE_KQUEUE=1。
 #   3. Windows 用 select 后端，并需 EV_SELECT_IS_WINSOCKET=1 让 select 操作 SOCKET 句柄。
 
-set(LIBEV_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libev)
+include(FetchContent)
+
+set(LIBEV_GIT_REPOSITORY "https://github.com/Bepartofyou/libev.git")
+set(LIBEV_GIT_TAG "a56570ae6d076d7471b945116171c88724ba14a9")
+
+FetchContent_Declare(
+    libev
+    GIT_REPOSITORY ${LIBEV_GIT_REPOSITORY}
+    GIT_TAG        ${LIBEV_GIT_TAG}
+)
+FetchContent_GetProperties(libev)
+if(NOT libev_POPULATED)
+    FetchContent_Populate(libev)
+endif()
+
+set(LIBEV_DIR ${libev_SOURCE_DIR})
 
 add_library(ev STATIC ${LIBEV_DIR}/ev.c)
 

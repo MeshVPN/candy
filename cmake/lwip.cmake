@@ -1,7 +1,7 @@
 include(FetchContent)
 
-set(LWIP_GIT_REPOSITORY "https://github.com/heiher/lwip.git")
-set(LWIP_GIT_TAG "8c69dfbe537835d5f2a5fd8c08c859f667b108ea")
+set(LWIP_GIT_REPOSITORY "https://github.com/Bepartofyou/lwip.git")
+set(LWIP_GIT_TAG "2ce295cc41ecbfcb7c71eae35ae3e018b408fc5b")
 
 FetchContent_Declare(
     lwip
@@ -13,21 +13,19 @@ if(NOT lwip_POPULATED)
     FetchContent_Populate(lwip)
 endif()
 
-# 补丁：heiher lwIP 的 UDP PRETEND 克隆路径用了 pcb->local_ip.type，
-# 该字段仅在双栈(LWIP_IPV6=1)的 ip_addr_t 存在；本项目是 IPv4-only，
-# 编译会报 "ip_addr_t has no member named type"。改用版本无关的
-# IP_GET_TYPE() 宏（IPv4-only 下展开为 IPADDR_TYPE_V4），不引入 IPv6。
-set(LWIP_UDP_C "${lwip_SOURCE_DIR}/src/core/udp.c")
-file(READ "${LWIP_UDP_C}" _lwip_udp_src)
-string(REPLACE
-    "udp_new_ip_type(pcb->local_ip.type)"
-    "udp_new_ip_type(IP_GET_TYPE(&pcb->local_ip))"
-    _lwip_udp_src "${_lwip_udp_src}")
-file(WRITE "${LWIP_UDP_C}" "${_lwip_udp_src}")
-
 set(LWIP_SRC_DIR ${lwip_SOURCE_DIR}/src)
-set(LWIP_PORT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/candy/src/netstack/lwip-port)
-set(LWIP_OPTS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/candy/src/netstack)
+# 直接复用 fork（Bepartofyou/lwip）自带的移植层与配置：
+# - src/ports/unix|win32/lib/sys_arch.c：平台适配，不再手写。
+# - src/ports/include/arch/*.h：转发头，按平台自动转发到 unix/win32 实现头。
+# - src/ports/include/lwipopts.h：已在 fork 内改成 candy 定制配置，
+#   candy 不再单独维护 lwipopts.h。
+# 另：udp.c 的 IPv4-only 兼容修复（IP_GET_TYPE）也已合入 fork，无需再打补丁。
+set(LWIP_PORT_INCLUDE_DIR ${LWIP_SRC_DIR}/ports/include)
+if(WIN32)
+    set(LWIP_PORT_DIR ${LWIP_SRC_DIR}/ports/win32)
+else()
+    set(LWIP_PORT_DIR ${LWIP_SRC_DIR}/ports/unix)
+endif()
 
 set(LWIP_CORE_SOURCES
     ${LWIP_SRC_DIR}/core/init.c
@@ -56,7 +54,7 @@ set(LWIP_CORE_IPV4_SOURCES
 )
 
 set(LWIP_PORT_SOURCES
-    ${LWIP_PORT_DIR}/sys_arch.c
+    ${LWIP_PORT_DIR}/lib/sys_arch.c
 )
 
 add_library(lwip STATIC
@@ -66,7 +64,7 @@ add_library(lwip STATIC
 )
 
 target_include_directories(lwip PUBLIC
-    ${LWIP_OPTS_DIR}
-    ${LWIP_PORT_DIR}
+    ${LWIP_PORT_INCLUDE_DIR}
+    ${LWIP_PORT_DIR}/include
     ${LWIP_SRC_DIR}/include
 )
