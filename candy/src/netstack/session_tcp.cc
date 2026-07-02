@@ -288,7 +288,7 @@ void SessionTcp::shutdownFromStack() {
 void SessionTcp::onFdEvent(uint32_t events) {
     ReactorEvent ev = (ReactorEvent)events;
     if (!this->connected) {
-        if (ev & ReactorEvent::ERROR) {
+        if (ev & ReactorEvent::FAILURE) {
             closeFromReactor();
             return;
         }
@@ -299,7 +299,7 @@ void SessionTcp::onFdEvent(uint32_t events) {
     }
     // 已连接：优先把可读数据/EOF 读干净（read 返回 0 走优雅排空，返回 -1 走关闭），
     // 避免 ERROR/HUP 与可读数据同时到达时抢先关闭而丢失尾部数据。
-    if (ev & (ReactorEvent::READ | ReactorEvent::ERROR)) {
+    if (ev & (ReactorEvent::READ | ReactorEvent::FAILURE)) {
         onFdReadable();
     }
     if (ev & ReactorEvent::WRITE) {

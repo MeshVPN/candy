@@ -167,7 +167,7 @@ void SessionUdp::shutdownFromStack() {
 
 void SessionUdp::onFdEvent(uint32_t events) {
     ReactorEvent ev = (ReactorEvent)events;
-    if (ev & ReactorEvent::ERROR) {
+    if (ev & ReactorEvent::FAILURE) {
         closeFromReactor();
         return;
     }

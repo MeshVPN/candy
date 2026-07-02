@@ -35,7 +35,7 @@ static ReactorEvent fromEvEvents(int revents) {
         events = events | ReactorEvent::WRITE;
     }
     if (revents & EV_ERROR) {
-        events = events | ReactorEvent::ERROR;
+        events = events | ReactorEvent::FAILURE;
     }
     return events;
 }

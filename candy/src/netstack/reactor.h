@@ -21,7 +21,7 @@ enum class ReactorEvent : uint32_t {
     NONE = 0,
     READ = 1 << 0,
     WRITE = 1 << 1,
-    ERROR = 1 << 2,
+    FAILURE = 1 << 2,
 };
 
 inline ReactorEvent operator|(ReactorEvent a, ReactorEvent b) {

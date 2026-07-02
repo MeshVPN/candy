@@ -10,6 +10,9 @@
 #include <memory>
 #include <string>
 
+// Windows：在 lwIP 头之前引入 winsock（见 netstack.h 说明），避免 htonl 宏改写导致声明冲突。
+#include "netstack/sockcompat.h"
+
 #include "lwip/udp.h"
 
 namespace candy {
