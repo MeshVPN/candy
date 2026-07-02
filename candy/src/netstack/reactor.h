@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -18,6 +19,10 @@ class PollSet;
 } // namespace Poco
 
 namespace candy {
+
+// IoWatcher 定义于 .cc：内含非拥有的 Poco::Net::Socket、fd 与事件回调。
+// 此处仅前向声明，头文件不暴露 Poco 类型。
+struct IoWatcher;
 
 enum class ReactorEvent : uint32_t {
     NONE = 0,
@@ -72,10 +77,9 @@ private:
     void applyMod(int fd, ReactorEvent events);
     void applyDel(int fd);
 
-    Poco::Net::PollSet *pollSet;
-    // fd -> IoWatcher*（IoWatcher 定义于 .cc，内含非拥有的 Poco::Net::Socket 与事件回调）。
-    // 仅 reactor 线程访问，无需加锁。
-    std::unordered_map<int, void *> ioWatchers;
+    std::unique_ptr<Poco::Net::PollSet> pollSet;
+    // fd -> IoWatcher（内含非拥有的 Poco::Net::Socket 与事件回调）。仅 reactor 线程访问，无需加锁。
+    std::unordered_map<int, std::unique_ptr<IoWatcher>> ioWatchers;
 
     std::thread thread;
     std::atomic<bool> running;

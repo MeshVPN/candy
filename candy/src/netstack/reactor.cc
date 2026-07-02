@@ -22,6 +22,9 @@ public:
 // 非拥有的 Socket：仅用于把落地 fd 交给 PollSet 监听，不持有 fd 生命周期。
 class NonOwningSocket : public Poco::Net::Socket {
 public:
+    // 说明：Poco::Net::Socket(SocketImpl*) 是框架约定的唯一构造入口——SocketImpl 派生自
+    // RefCountedObject，Socket 会接管其引用计数并在析构时 release()，故此处 new 出来的 impl
+    // 生命周期由 Poco 内部托管，并非需要手动 delete 的裸指针。
     explicit NonOwningSocket(int fd) : Poco::Net::Socket(new NonOwningSocketImpl(fd)) {}
 };
 
@@ -59,14 +62,14 @@ static ReactorEvent fromPocoMode(int mode) {
     return events;
 }
 
-Reactor::Reactor() : pollSet(nullptr), running(false) {}
+Reactor::Reactor() : running(false) {}
 
 Reactor::~Reactor() {
     stop();
 }
 
 int Reactor::start() {
-    this->pollSet = new Poco::Net::PollSet();
+    this->pollSet = std::make_unique<Poco::Net::PollSet>();
     this->running.store(true);
     this->thread = std::thread([this] { this->loop(); });
     // 在启动线程内确定性记录 reactor 线程 id（早于任何跨线程 add/mod/del 访问），
@@ -83,23 +86,16 @@ void Reactor::stop() {
         return;
     }
     // 唤醒 reactor 线程：poll 立即返回，循环检测到 !running 后退出。
-    if (this->pollSet != nullptr) {
+    if (this->pollSet) {
         this->pollSet->wakeUp();
     }
     if (this->thread.joinable()) {
         this->thread.join();
     }
 
-    // 线程已退出，安全清理剩余 watcher 与 pollSet（仅本线程访问）。
-    for (auto &kv : this->ioWatchers) {
-        delete (IoWatcher *)kv.second;
-    }
+    // 线程已退出，安全清理剩余 watcher 与 pollSet（仅本线程访问）。unique_ptr 自动释放。
     this->ioWatchers.clear();
-
-    if (this->pollSet != nullptr) {
-        delete this->pollSet;
-        this->pollSet = nullptr;
-    }
+    this->pollSet.reset();
 }
 
 bool Reactor::onLoopThread() const {
@@ -112,8 +108,8 @@ int Reactor::add(int fd, ReactorEvent events, EventHandler handler) {
     if (onLoopThread()) {
         applyAdd(fd, events, std::move(handler));
     } else {
-        auto h = std::make_shared<EventHandler>(std::move(handler));
-        post([this, fd, events, h] { this->applyAdd(fd, events, std::move(*h)); });
+        // C++17 init-capture：把 handler 移动进 lambda，无需 shared_ptr 包裹。
+        post([this, fd, events, handler = std::move(handler)]() mutable { this->applyAdd(fd, events, std::move(handler)); });
     }
     return 0;
 }
@@ -142,15 +138,15 @@ void Reactor::applyAdd(int fd, ReactorEvent events, EventHandler handler) {
     auto it = this->ioWatchers.find(fd);
     if (it != this->ioWatchers.end()) {
         // 已存在：等价于替换 handler 与兴趣集（防御性，正常不应发生）。
-        IoWatcher *iw = (IoWatcher *)it->second;
-        iw->handler = std::move(handler);
-        iw->events = events;
-        this->pollSet->update(iw->socket, toPocoMode(events));
+        IoWatcher &iw = *it->second;
+        iw.handler = std::move(handler);
+        iw.events = events;
+        this->pollSet->update(iw.socket, toPocoMode(events));
         return;
     }
-    IoWatcher *iw = new IoWatcher{fd, NonOwningSocket(fd), std::move(handler), events};
+    auto iw = std::make_unique<IoWatcher>(IoWatcher{fd, NonOwningSocket(fd), std::move(handler), events});
     this->pollSet->add(iw->socket, toPocoMode(events));
-    this->ioWatchers[fd] = iw;
+    this->ioWatchers.emplace(fd, std::move(iw));
 }
 
 void Reactor::applyMod(int fd, ReactorEvent events) {
@@ -158,13 +154,13 @@ void Reactor::applyMod(int fd, ReactorEvent events) {
     if (it == this->ioWatchers.end()) {
         return;
     }
-    IoWatcher *iw = (IoWatcher *)it->second;
-    if (iw->events == events) {
+    IoWatcher &iw = *it->second;
+    if (iw.events == events) {
         return;
     }
-    iw->events = events;
+    iw.events = events;
     // update 为非累积语义：直接覆盖为新的兴趣集（与原 mod 语义一致）。
-    this->pollSet->update(iw->socket, toPocoMode(events));
+    this->pollSet->update(iw.socket, toPocoMode(events));
 }
 
 void Reactor::applyDel(int fd) {
@@ -172,10 +168,9 @@ void Reactor::applyDel(int fd) {
     if (it == this->ioWatchers.end()) {
         return;
     }
-    IoWatcher *iw = (IoWatcher *)it->second;
-    this->pollSet->remove(iw->socket);
+    this->pollSet->remove(it->second->socket);
+    // erase 会析构 unique_ptr<IoWatcher>，自动释放，无需手动 delete。
     this->ioWatchers.erase(it);
-    delete iw;
 }
 
 // ===================== 跨线程任务投递 =====================
@@ -185,7 +180,7 @@ void Reactor::post(Task task) {
         std::unique_lock lock(this->taskMutex);
         this->tasks.push(std::move(task));
     }
-    if (this->pollSet != nullptr) {
+    if (this->pollSet) {
         this->pollSet->wakeUp();
     }
 }
@@ -209,17 +204,16 @@ void Reactor::loop() {
     const Poco::Timespan timeout(1, 0); // 1s
     while (this->running.load()) {
         Poco::Net::PollSet::SocketModeMap ready = this->pollSet->poll(timeout);
-        for (auto &kv : ready) {
-            int fd = (int)kv.first.impl()->sockfd();
+        for (const auto &[socket, mode] : ready) {
+            int fd = static_cast<int>(socket.impl()->sockfd());
             auto it = this->ioWatchers.find(fd);
             if (it == this->ioWatchers.end()) {
                 continue;
             }
-            IoWatcher *iw = (IoWatcher *)it->second;
             // 关键：先把 handler 拷贝到局部，再调用。handler 内部可能 del(fd) 释放本 IoWatcher，
-            // 拷贝后调用可避免 use-after-free；回调返回前不再触碰 iw。
-            Reactor::EventHandler handler = iw->handler;
-            handler(fromPocoMode(kv.second));
+            // 拷贝后调用可避免 use-after-free；回调返回前不再触碰 it/IoWatcher。
+            Reactor::EventHandler handler = it->second->handler;
+            handler(fromPocoMode(mode));
         }
         drainTasks();
     }
