@@ -17,6 +17,10 @@
 #include <thread>
 #include <unordered_map>
 
+// Windows：必须在 lwIP 头之前引入 winsock（sockcompat.h 内已按平台处理），否则
+// lwip/def.h 的 htonl 宏会改写 winsock 中 htonl 的原型，导致 lwip_htonl 声明冲突。
+#include "netstack/sockcompat.h"
+
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
