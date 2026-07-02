@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "websocket/message.h"
 #include "utils/time.h"
+#include <cstring>
 
 namespace candy {
 namespace WsMsg {
