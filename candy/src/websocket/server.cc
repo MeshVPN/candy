@@ -14,6 +14,7 @@
 #include <Poco/Net/WebSocket.h>
 #include <Poco/Timespan.h>
 #include <Poco/URI.h>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <memory>
