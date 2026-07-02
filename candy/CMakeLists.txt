@@ -19,9 +19,6 @@ target_link_libraries(candy-library PRIVATE Poco::Foundation Poco::JSON Poco::Ne
 target_link_libraries(candy-library PRIVATE Threads::Threads)
 target_link_libraries(candy-library PRIVATE lwip)
 
-# libev：reactor 事件循环后端（vendored 源码编译，见 cmake/libev.cmake）。
-target_link_libraries(candy-library PRIVATE Candy::ev)
-
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     target_link_libraries(candy-library PRIVATE ws2_32)
 endif()
