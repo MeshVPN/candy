@@ -62,16 +62,16 @@ MsgQueue &Client::getWsMsgQueue() {
     return this->wsMsgQueue;
 }
 
-NetStack &Client::getNetStack() {
-    return this->netstack;
+MsgQueue &Client::getNetStackMsgQueue() {
+    return this->netstackMsgQueue;
 }
 
-std::string Client::getForwardMode() const {
-    return this->forwardMode;
+bool Client::getUserspaceStack() const {
+    return this->userspaceStack;
 }
 
 int Client::getMtu() const {
-    return this->mtu;
+    return this->tun.getMTU();
 }
 
 void Client::setPassword(const std::string &password) {
@@ -116,23 +116,21 @@ void Client::setLocalhost(std::string ip) {
 }
 
 void Client::setMtu(int mtu) {
-    this->mtu = mtu;
     tun.setMTU(mtu);
 }
 
-void Client::setForwardMode(const std::string &mode) {
-    this->forwardMode = mode;
+void Client::setUserspaceStack(bool enable) {
+    this->userspaceStack = enable;
 }
 
 void Client::run() {
     this->running.store(true);
 
-    if (this->forwardMode == "userspace") {
-        if (netstack.run(this)) {
-            return;
-        }
+#ifdef CANDY_NETSTACK
+    if (netstack.run(this)) {
+        return;
     }
-
+#endif
     if (ws.run(this)) {
         return;
     }
@@ -146,14 +144,14 @@ void Client::run() {
     ws.wait();
     tun.wait();
     peerManager.wait();
-    if (this->forwardMode == "userspace") {
-        netstack.shutdown();
-        netstack.wait();
-    }
+#ifdef CANDY_NETSTACK
+    netstack.wait();
+#endif
 
     wsMsgQueue.clear();
     tunMsgQueue.clear();
     peerMsgQueue.clear();
+    netstackMsgQueue.clear();
 }
 
 bool Client::isRunning() {

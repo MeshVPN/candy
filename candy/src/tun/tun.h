@@ -21,6 +21,7 @@ public:
 
     int setName(const std::string &name);
     int setMTU(int mtu);
+    int getMTU() const;
 
     int run(Client *client);
     int wait();
@@ -36,6 +37,8 @@ private:
     // 处理来自消息队列的数据
     int handleTunQueue();
     int handlePacket(Msg msg);
+    // IPIP 内层源是否落在本机路由子网内（返程/中转流量判定）。
+    bool isReturnTraffic(const IP4Header &header, std::size_t size);
     int handleTunAddr(Msg msg);
     int handleSysRt(Msg msg);
 

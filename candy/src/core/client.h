@@ -3,11 +3,13 @@
 #define CANDY_CORE_CLIENT_H
 
 #include "core/message.h"
-#include "netstack/netstack.h"
 #include "peer/manager.h"
 #include "tun/tun.h"
 #include "utils/atomic.h"
 #include "websocket/client.h"
+#ifdef CANDY_NETSTACK
+#include "netstack/netstack.h"
+#endif
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -43,7 +45,7 @@ public:
     void setExptTunAddress(const std::string &cidr);
     void setVirtualMac(const std::string &vmac);
 
-    void setForwardMode(const std::string &mode);
+    void setUserspaceStack(bool enable);
 
     void run();
     bool isRunning();
@@ -60,23 +62,24 @@ public:
     MsgQueue &getTunMsgQueue();
     MsgQueue &getPeerMsgQueue();
     MsgQueue &getWsMsgQueue();
+    MsgQueue &getNetStackMsgQueue();
 
-    NetStack &getNetStack();
-    std::string getForwardMode() const;
+    bool getUserspaceStack() const;
     int getMtu() const;
 
 private:
-    MsgQueue tunMsgQueue, peerMsgQueue, wsMsgQueue;
+    MsgQueue tunMsgQueue, peerMsgQueue, wsMsgQueue, netstackMsgQueue;
 
     Tun tun;
     PeerManager peerManager;
     WebSocketClient ws;
+#ifdef CANDY_NETSTACK
     NetStack netstack;
+#endif
 
 private:
     std::string tunName;
-    std::string forwardMode = "kernel";
-    int mtu = 1400;
+    bool userspaceStack = false;
 };
 
 } // namespace candy

@@ -37,7 +37,7 @@ Poco::JSON::Object arguments::json() {
         config.set("port", this->port);
         config.set("vmac", virtualMac(this->name));
         config.set("expt", loadTunAddress(this->name));
-        config.set("forward-mode", this->forwardMode);
+        config.set("userspace-stack", this->userspaceStack);
     }
 
     if (this->mode == "server") {
@@ -126,7 +126,10 @@ int arguments::parse(int argc, char *argv[]) {
               "If omitted, auto-detected from the first physical network interface. (client only)")
         .metavar("<ip>");
 
-    program.add_argument("--forward-mode").help("packet forward mode: kernel or userspace");
+    program.add_argument("--userspace-stack")
+        .help("enable the embedded userspace network stack (lwIP) for traffic landing.\n"
+              "Default is off (kernel stack). Requires a build with CANDY_NETSTACK=ON. (client only)")
+        .implicit_value(true);
 
     program.add_group("Server options");
 
@@ -185,7 +188,7 @@ int arguments::parse(int argc, char *argv[]) {
         program.set_if_used("--mtu", this->mtu);
         program.set_if_used("--discovery", this->discovery);
         program.set_if_used("--route", this->routeCost);
-        program.set_if_used("--forward-mode", this->forwardMode);
+        program.set_if_used("--userspace-stack", this->userspaceStack);
 
         bool needShowUsage = [&]() {
             if (this->mode != "client" && this->mode != "server")
@@ -243,7 +246,7 @@ void arguments::parseFile(std::string cfgFile) {
             {"port", [&](const std::string &value) { this->port = std::stoi(value); }},
             {"mtu", [&](const std::string &value) { this->mtu = std::stoi(value); }},
             {"localhost", [&](const std::string &value) { this->localhost = value; }},
-            {"forward-mode", [&](const std::string &value) { this->forwardMode = value; }},
+            {"userspace-stack", [&](const std::string &value) { this->userspaceStack = (value == "true"); }},
         };
         auto trim = [](std::string str) {
             if (str.length() >= 2 && str.front() == '\"' && str.back() == '\"') {

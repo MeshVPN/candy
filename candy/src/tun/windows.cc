@@ -115,6 +115,10 @@ public:
         return 0;
     }
 
+    int getMTU() {
+        return this->mtu;
+    }
+
     int up() {
         if (!Holder::Ok()) {
             candy::logger().fatal("init wintun failed");
@@ -313,6 +317,12 @@ int Tun::setMTU(int mtu) {
         return -1;
     }
     return 0;
+}
+
+int Tun::getMTU() const {
+    std::shared_ptr<WindowsTun> tun;
+    tun = std::any_cast<std::shared_ptr<WindowsTun>>(this->impl);
+    return tun->getMTU();
 }
 
 int Tun::up() {

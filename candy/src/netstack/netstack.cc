@@ -44,6 +44,13 @@ Outbound &NetStack::getOutbound() {
 
 int NetStack::run(Client *client) {
     this->client = client;
+
+    // userspace 用户态协议栈的启用判定收敛在本模块内部，使 Client::run 里各模块调用
+    // 视觉平行；未启用时本模块不启动任何线程、不占用资源。
+    if (!client->getUserspaceStack()) {
+        return 0;
+    }
+
     this->running.store(true);
 
     if (this->reactor.start()) {
@@ -67,14 +74,51 @@ int NetStack::run(Client *client) {
         }
         spdlog::debug("stop thread: netstack");
     });
+
+    this->msgThread = std::thread([this] {
+        spdlog::debug("start thread: netstack msg");
+        try {
+            while (getClient()->isRunning()) {
+                if (handleQueue()) {
+                    break;
+                }
+            }
+            getClient()->shutdown();
+        } catch (const std::exception &e) {
+            spdlog::error("netstack msg thread exception: {}", e.what());
+            getClient()->shutdown();
+        }
+        spdlog::debug("stop thread: netstack msg");
+    });
     return 0;
 }
 
 int NetStack::wait() {
+    // 内部驱动 stack loop 退出，无需 Client 显式先调 shutdown()，保持与其他模块
+    // 「run + wait」两段式调用对称。未启用 userspace 时线程均未创建，join 为空操作。
+    shutdown();
     if (this->stackThread.joinable()) {
         this->stackThread.join();
     }
+    if (this->msgThread.joinable()) {
+        this->msgThread.join();
+    }
     this->reactor.stop();
+    return 0;
+}
+
+int NetStack::handleQueue() {
+    Msg msg = this->client->getNetStackMsgQueue().read();
+    switch (msg.kind) {
+    case MsgKind::TIMEOUT:
+        break;
+    case MsgKind::NETSTACK:
+        input(std::move(msg.data));
+        break;
+    default:
+        spdlog::warn("unexcepted netstack message type: {}", static_cast<int>(msg.kind));
+        break;
+    }
     return 0;
 }
 
@@ -102,6 +146,10 @@ int NetStack::initStack() {
     static std::once_flag lwipInitFlag;
     std::call_once(lwipInitFlag, [] { lwip_init(); });
 
+    // 这里的 addr/mask 是 lwIP 内部 netif 的占位地址，不是 candy 的虚拟网卡地址，
+    // 二者无需匹配：本 netif 配合下方 NETIF_FLAG_PRETEND_TCP 作为「捕获全部」网卡，
+    // 把喂进来的 IPIP 内层包无条件交给 lwIP 协议栈终结（lwIP 不会用这个地址回 ARP，
+    // 也不会据此做路由判定）。选 10.255.255.254/32 只是取一个不与业务网段冲突的占位值。
     ip4_addr_t addr, mask, gw;
     IP4_ADDR(&addr, 10, 255, 255, 254);
     IP4_ADDR(&mask, 255, 255, 255, 255);

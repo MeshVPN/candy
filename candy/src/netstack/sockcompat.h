@@ -6,8 +6,8 @@
 // 使 session_tcp / session_udp 的落地收发逻辑三端共用同一份代码。
 // 约定：对外统一以 int 表示 socket（Windows SOCKET 为小整数句柄，转换安全）。
 
-#include <cstddef>
 #include <string>
+#include <system_error>
 
 #if defined(_WIN32) || defined(_WIN64)
 #ifndef _WIN32_WINNT
@@ -16,8 +16,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
-#include <cerrno>
-#include <cstring>
+#include <cerrno> // errno 是 C 标准库唯一入口，无 C++ 等价，属不得已保留。
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -95,7 +94,7 @@ inline std::string netErrStr(int err) {
 #if defined(_WIN32) || defined(_WIN64)
     return "wsa error " + std::to_string(err);
 #else
-    return std::strerror(err);
+    return std::generic_category().message(err);
 #endif
 }
 

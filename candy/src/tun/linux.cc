@@ -44,6 +44,10 @@ public:
         return 0;
     }
 
+    int getMTU() {
+        return this->mtu;
+    }
+
     // 配置网卡,设置路由
     int up() {
         this->tunFd = open("/dev/net/tun", O_RDWR);
@@ -260,6 +264,12 @@ int Tun::setMTU(int mtu) {
         return -1;
     }
     return 0;
+}
+
+int Tun::getMTU() const {
+    std::shared_ptr<LinuxTun> tun;
+    tun = std::any_cast<std::shared_ptr<LinuxTun>>(this->impl);
+    return tun->getMTU();
 }
 
 int Tun::up() {

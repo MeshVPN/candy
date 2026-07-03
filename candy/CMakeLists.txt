@@ -1,6 +1,10 @@
 add_library(candy-library)
 
 file(GLOB_RECURSE SOURCES "src/*.cc")
+# 未开启 CANDY_NETSTACK 时，netstack 目录整体不参与编译（默认关闭，零代码编译）。
+if (NOT CANDY_NETSTACK)
+    list(FILTER SOURCES EXCLUDE REGEX "/src/netstack/")
+endif()
 target_sources(candy-library PRIVATE ${SOURCES})
 
 target_include_directories(candy-library PUBLIC 
@@ -17,7 +21,9 @@ endif()
 
 target_link_libraries(candy-library PRIVATE Poco::Foundation Poco::JSON Poco::Net Poco::NetSSL)
 target_link_libraries(candy-library PRIVATE Threads::Threads)
-target_link_libraries(candy-library PRIVATE lwip)
+if (${CANDY_NETSTACK})
+    target_link_libraries(candy-library PRIVATE lwip)
+endif()
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     target_link_libraries(candy-library PRIVATE ws2_32)

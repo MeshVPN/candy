@@ -99,7 +99,7 @@ bool run(const std::string &id, const Poco::JSON::Object &config) {
         client->setRouteCost(config.getValue<int>("route")), client->setMtu(config.getValue<int>("mtu"));
         client->setPort(config.getValue<int>("port"));
         client->setLocalhost(config.getValue<std::string>("localhost"));
-        client->setForwardMode(config.optValue<std::string>("forward-mode", "kernel"));
+        client->setUserspaceStack(config.optValue<bool>("userspace-stack", false));
         client->run();
     }
     candy::logger().information(Poco::format("run exit: id=%s ", id));

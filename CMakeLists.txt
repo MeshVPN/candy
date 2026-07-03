@@ -86,7 +86,14 @@ endif()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/lwip.cmake)
+# 用户态协议栈（netstack + lwIP）编译开关。默认关闭：不编译任何 netstack 代码、
+# 不拉取 lwIP。线上发行版打包（部分要求构建时无网络）保持关闭即可零影响。
+# GitHub Release 的纯静态二进制可用 -DCANDY_NETSTACK=ON 开启此功能。
+option(CANDY_NETSTACK "Build the embedded userspace network stack (lwIP)" OFF)
+if (${CANDY_NETSTACK})
+    add_compile_definitions(CANDY_NETSTACK)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/lwip.cmake)
+endif()
 
 add_subdirectory(candy)
 add_subdirectory(candy-cli)

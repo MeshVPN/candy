@@ -3,6 +3,12 @@
 #include "netstack/sockcompat.h"
 #include <spdlog/spdlog.h>
 
+// 说明（回应 review：优先用 Poco 封装）：此处属「不得已」而使用平台相关裸 socket。
+// 原因：落地 fd 的生命周期由 Reactor 按裸 int fd 统一管理（注册/注销/关闭），
+// 而 Poco::Net::StreamSocket/DatagramSocket 会自行持有并在析构时关闭 fd，
+// 与 Reactor 的 fd 所有权模型冲突，若混用会导致 double-close。故这里只借用
+// 系统 socket() 拿到裸 fd 交给 Reactor，平台差异已收敛在 sockcompat.h 内，
+// 本文件仅剩 sockaddr_in 组装这一处必须用平台头。
 #if defined(__linux__) || defined(__APPLE__)
 #include <arpa/inet.h>
 #include <netinet/in.h>

@@ -46,7 +46,6 @@ public:
 
     // 把待终结的 IP 包投递给 NetStack（来自 tun 落地分支，含 IPIP 外层）。
     void input(std::string packet);
-
     // 供 Session 使用：在 NetStack 线程内执行任务（保证 lwIP API 线程安全）。
     void postToStack(std::function<void()> task);
     Reactor &getReactor();
@@ -69,6 +68,8 @@ private:
     int initStack();
     void teardownStack();
     void loop();
+    // 读取本模块 MsgQueue（MsgKind::NETSTACK 落地入站包），驱动 input()。
+    int handleQueue();
     void handleInput(std::string packet);
     void feedToLwip(const std::string &innerPacket, IP4 vnetPeer);
     // UDP 伪会话空闲超时回收（仅 NetStack 线程，loop 中节流调用）。
@@ -90,6 +91,7 @@ private:
     Client *client;
 
     std::thread stackThread;
+    std::thread msgThread;
     std::atomic<bool> running;
 
     struct netif lwipNetif;

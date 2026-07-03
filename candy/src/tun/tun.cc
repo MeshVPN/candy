@@ -115,35 +115,42 @@ int Tun::handlePacket(Msg msg) {
     }
     IP4Header *header = (IP4Header *)msg.data.data();
 
+#ifdef CANDY_NETSTACK
+    // userspace 模式下的新入站连接：内层源不可路由的 IPIP 包整包交给 NetStack 用 lwIP
+    // 终结。这一分支不剥壳、不写内核 tun，直接经 MsgQueue 转交 netstack 模块（跨模块
+    // 数据一律走 MsgQueue，不直接持有 netstack）。判定完成后提前返回，下方只保留唯一
+    // 的一处 erase + write。未编译 CANDY_NETSTACK 时本分支不存在，一律走内核转发。
+    if (header->isIPIP() && !isReturnTraffic(*header, msg.data.size()) && getClient().getUserspaceStack()) {
+        this->client->getNetStackMsgQueue().write(Msg(MsgKind::NETSTACK, std::move(msg.data)));
+        return 0;
+    }
+#endif
+
+    // 其余情况都要写内核 tun：
+    // - IPIP 返程/中转，或 kernel 模式的 IPIP 入站：剥掉 IPIP 外层(20B)后写。
+    // - 非 IPIP 的普通包：原样写。
     if (header->isIPIP()) {
-        // 内层源地址落在本机已知路由子网内 => 本机(经本网关)发起流量的返程/中转，
-        // 剥掉 IPIP 外层后写内核 tun，L3 转发回本地 LAN。
-        // 该判定复用本就为路由维护的 sysRtTable，无需额外的发起流跟踪表：
-        // 「本机能发起到的子网」== 「sysRtTable 里能命中的子网」，O(1) 空间。
-        if (msg.data.size() >= sizeof(IP4Header) * 2) {
-            const IP4Header *inner = header + 1;
-            std::shared_lock lock(this->sysRtMutex);
-            for (auto const &rt : sysRtTable) {
-                if ((inner->saddr & rt.mask) == rt.dst) {
-                    msg.data.erase(0, sizeof(IP4Header));
-                    write(msg.data);
-                    return 0;
-                }
-            }
-        }
-
-        // 内层源不可路由 => 新入站连接：userspace 模式把 IPIP 整包交给 NetStack 用 lwIP 终结。
-        if (getClient().getForwardMode() == "userspace") {
-            getClient().getNetStack().input(std::move(msg.data));
-            return 0;
-        }
-
-        // kernel 模式：剥掉 IPIP 外层后写内核 tun。
         msg.data.erase(0, sizeof(IP4Header));
     }
-
     write(msg.data);
     return 0;
+}
+
+bool Tun::isReturnTraffic(const IP4Header &header, size_t size) {
+    // 内层源地址落在本机已知路由子网内 => 本机(经本网关)发起流量的返程/中转。
+    // 复用本就为路由维护的 sysRtTable：「本机能发起到的子网」== 「sysRtTable 命中的
+    // 子网」，O(1) 空间，无需额外发起流跟踪表。
+    if (size < sizeof(IP4Header) * 2) {
+        return false;
+    }
+    const IP4Header *inner = &header + 1;
+    std::shared_lock lock(this->sysRtMutex);
+    for (auto const &rt : sysRtTable) {
+        if ((inner->saddr & rt.mask) == rt.dst) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int Tun::handleTunAddr(Msg msg) {
