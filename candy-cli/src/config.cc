@@ -127,8 +127,8 @@ int arguments::parse(int argc, char *argv[]) {
         .metavar("<ip>");
 
     program.add_argument("--userspace-stack")
-        .help("enable the embedded userspace network stack (lwIP) for traffic landing.\n"
-              "Default is off (kernel stack). Requires a build with CANDY_NETSTACK=ON. (client only)")
+        .help("terminate landing traffic with the built-in userspace network stack (lwIP)\n"
+              "instead of the kernel stack. Default is false (kernel). (client only)")
         .implicit_value(true);
 
     program.add_group("Server options");
