@@ -46,14 +46,9 @@ int arguments::parse(int argc, char *argv[]) {
 
     program.add_description("A simple P2P VPN / SD-WAN networking tool.");
 
-    program.add_argument("-c", "--config")
-        .help("config file path (key=value format, same keys as CLI args)")
-        .metavar("<path>");
+    program.add_argument("-c", "--config").help("config file path (key=value format, same keys as CLI args)").metavar("<path>");
 
-    program.add_argument("-m", "--mode")
-        .help("working mode: \"client\" or \"server\"")
-        .metavar("<mode>")
-        .required();
+    program.add_argument("-m", "--mode").help("working mode: \"client\" or \"server\"").metavar("<mode>");
 
     program.add_argument("-w", "--websocket")
         .help("WebSocket signaling address (e.g. \"ws://host:port/ws\").\n"
@@ -145,20 +140,17 @@ int arguments::parse(int argc, char *argv[]) {
         .help("omit timestamps from log output (shows only log level and message).")
         .implicit_value(true);
 
-    program.add_argument("--debug")
-        .help("enable debug-level logging.")
-        .implicit_value(true);
+    program.add_argument("--debug").help("enable debug-level logging.").implicit_value(true);
 
-    program.add_epilog(
-        "Examples:\n"
-        "  Client with static address:\n"
-        "    candy -m client -w wss://server.example.com/ws -p mysecret -t 192.168.202.1/24\n"
-        "  Client with DHCP (dynamic address):\n"
-        "    candy -m client -w wss://server.example.com/ws -p mysecret -s stun://stun.example.com\n"
-        "  Server:\n"
-        "    candy -m server -w ws://0.0.0.0:8080/ws -p mysecret -d 192.168.202.0/24\n"
-        "  Using config file:\n"
-        "    candy -c candy.cfg");
+    program.add_epilog("Examples:\n"
+                       "  Client with static address:\n"
+                       "    candy -m client -w wss://server.example.com/ws -p mysecret -t 192.168.202.1/24\n"
+                       "  Client with DHCP (dynamic address):\n"
+                       "    candy -m client -w wss://server.example.com/ws -p mysecret -s stun://stun.example.com\n"
+                       "  Server:\n"
+                       "    candy -m server -w ws://0.0.0.0:8080/ws -p mysecret -d 192.168.202.0/24\n"
+                       "  Using config file:\n"
+                       "    candy -c candy.cfg");
 
     try {
         program.parse_args(argc, argv);
