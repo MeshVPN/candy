@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "06d5a27f481fe15dafa647b04314e5d39801ec14",
+  "prompts": {},
+  "humans": {
+    "h_d91cb6e8c3e8c0": {
+      "author": "bepartofyou <wupengqiang0806@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
