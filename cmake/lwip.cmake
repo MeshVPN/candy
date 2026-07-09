@@ -1,7 +1,7 @@
 include(FetchContent)
 
 set(LWIP_GIT_REPOSITORY "https://github.com/Bepartofyou/lwip.git")
-set(LWIP_GIT_TAG "2ce295cc41ecbfcb7c71eae35ae3e018b408fc5b")
+set(LWIP_GIT_TAG "9b6fe14f0a44c477e10bf0e68da56b3498a91352")
 
 FetchContent_Declare(
     lwip
