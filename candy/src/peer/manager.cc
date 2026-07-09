@@ -360,7 +360,7 @@ int PeerManager::initSocket() {
         this->socket.bind(SocketAddress(AddressFamily::IPv4, this->listenPort));
         this->socket.setSendBufferSize(16 * 1024 * 1024);
         this->socket.setReceiveBufferSize(16 * 1024 * 1024);
-        candy::logger().debug(Poco::format("listen port: %u", this->socket.address().port()));
+        candy::logger().debug(Poco::format("listen port: %hu", this->socket.address().port()));
     } catch (Poco::Net::NetException &e) {
         candy::logger().fatal(Poco::format("peer socket init failed: %s: %s", std::string(e.what()), e.message()));
         return -1;
