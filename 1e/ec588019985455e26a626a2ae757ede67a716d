@@ -1,0 +1,28 @@
+candy/src/tun/tun.h
+  s_9b7f6be1939a0e::t_a84b5b16678ac1 68-69,71-78
+  s_9b7f6be1939a0e::t_d00369e079bd9b 99-106
+  s_9b7f6be1939a0e::t_289958d6ef9282 8-9,11,15,21-43
+  s_9b7f6be1939a0e::t_6e239a6fcd4891 44
+candy/src/tun/tun.cc
+  s_9b7f6be1939a0e::t_c480edd537dde1 128
+  s_9b7f6be1939a0e::t_c3766b5fa404a1 69-76
+  s_9b7f6be1939a0e::t_6b1acfbccf9fd7 161-271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1eec588019985455e26a626a2ae757ede67a716d",
+  "prompts": {},
+  "sessions": {
+    "s_9b7f6be1939a0e": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a3cd6254ed768035f985d9e",
+        "model": "openrouter-3o__dev"
+      },
+      "human_author": null
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
