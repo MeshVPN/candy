@@ -1,0 +1,62 @@
+candy/src/netstack/session_udp.cc
+  s_9b7f6be1939a0e::t_c12a1a514d472e 5-6
+  s_9b7f6be1939a0e::t_04ad81974aad53 100
+  s_9b7f6be1939a0e::t_a30ee678434b20 48
+  s_9b7f6be1939a0e::t_b980b0ce01ab4b 117
+  s_9b7f6be1939a0e::t_2a0bea55b8097c 133
+candy/src/netstack/outbound.cc
+  s_9b7f6be1939a0e::t_4a964ed4b5a66b 4-5
+  s_9b7f6be1939a0e::t_6eb473a56463e2 39-40
+  s_9b7f6be1939a0e::t_5370561fcd41db 27
+  s_9b7f6be1939a0e::t_fc2d3557d78383 54
+  s_9b7f6be1939a0e::t_fc8bc2031c451b 64
+candy/src/netstack/reactor.cc
+  s_9b7f6be1939a0e::t_6d0ab827010f54 202
+  s_9b7f6be1939a0e::t_7c842bcf207f75 220
+candy/src/netstack/session_tcp.cc
+  s_9b7f6be1939a0e::t_709f9e4d73cc18 229-231
+  s_9b7f6be1939a0e::t_393e13bdccc7b0 115-117
+  s_9b7f6be1939a0e::t_77fbceed7bcaba 5-6
+  s_9b7f6be1939a0e::t_07ee23ec0ab5d9 58-59
+  s_9b7f6be1939a0e::t_ace96fb38d3c79 324
+  s_9b7f6be1939a0e::t_b8610d7c33b4bf 370-372
+  s_9b7f6be1939a0e::t_ec3bccd5683b04 396-398
+candy/src/netstack/netstack.cc
+  s_9b7f6be1939a0e::t_227bacb4d15d81 437
+  s_9b7f6be1939a0e::t_b8da24d8009cea 479-480
+  s_9b7f6be1939a0e::t_ddd362b3ee9883 347
+  s_9b7f6be1939a0e::t_c98a7093a5f160 292
+  s_9b7f6be1939a0e::t_fffa3327bec714 200
+  s_9b7f6be1939a0e::t_9d7f115d43dbc3 429-430
+  s_9b7f6be1939a0e::t_2fd67ad76fcd69 7-8
+  s_9b7f6be1939a0e::t_c889c4d29c1817 205
+  s_9b7f6be1939a0e::t_23891e5880790e 367
+  s_9b7f6be1939a0e::t_aca0eb2cbc7956 63,66,73,76,80,89,92
+  s_9b7f6be1939a0e::t_e05050e638e218 120
+  s_9b7f6be1939a0e::t_e7331fab9a1fd2 160
+  s_9b7f6be1939a0e::t_6080360963f405 179
+  s_9b7f6be1939a0e::t_6b9ed4b110f78c 293
+  s_9b7f6be1939a0e::t_920816424e24b4 311-312
+  s_9b7f6be1939a0e::t_08f31a422e776e 341
+  s_9b7f6be1939a0e::t_ab8025b1259bbd 58
+  s_9b7f6be1939a0e::t_941f981e2f0b62 184
+  s_9b7f6be1939a0e::t_e07bb8ec266ee9 189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "998ebec718ce14a43c1f7334cf924e6b8ae4d477",
+  "prompts": {},
+  "sessions": {
+    "s_9b7f6be1939a0e": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a3cd6254ed768035f985d9e",
+        "model": "openrouter-3o__dev"
+      },
+      "human_author": "bepartofyou <wupengqiang0806@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
