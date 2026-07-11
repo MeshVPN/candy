@@ -36,9 +36,11 @@ public:
         return -1;
     }
 
-    // L4 终结型出站：为一条已终结的 UDP 流建立 connect 到目的的非阻塞 fd，失败返回 -1。
-    // 默认不支持。
-    virtual int dialUdp(const Endpoint &dst) {
+    // L4 终结型出站：为一条已终结的 UDP 流建立落地出口 fd。
+    // 全锥形（Full Cone）：不 connect 固定目的，而是 bind 一个固定出口端口的 unconnected
+    // socket，后续用 sendto 发往任意多目的、用 recvfrom 收任意对端回包，返回非阻塞 fd，
+    // 失败返回 -1。默认不支持。
+    virtual int dialUdp() {
         return -1;
     }
 };
@@ -52,7 +54,7 @@ public:
     }
 
     int dialTcp(const Endpoint &dst) override;
-    int dialUdp(const Endpoint &dst) override;
+    int dialUdp() override;
 };
 
 } // namespace candy

@@ -59,7 +59,7 @@ public:
 
     // Session 结束时从会话表移除。
     void removeSession(struct tcp_pcb *pcb);
-    // UDP 伪会话结束时从 UDP 会话表移除（按四元组 key）。仅 NetStack 线程调用。
+    // UDP 会话结束时从 UDP 会话表移除（按源二元组 key）。仅 NetStack 线程调用。
     void removeUdpSession(const std::string &key);
 
     Client *getClient();
@@ -84,7 +84,8 @@ private:
     err_t onNetifInit(struct netif *netif);
     err_t onOutput(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr);
     err_t onAccept(struct tcp_pcb *newpcb, err_t err);
-    // UDP 数据报到达：addr/port=源端(dev1)，pcb->local=目的(落地服务)。仅 NetStack 线程。
+    // UDP 数据报到达：addr/port=源端(dev1)，pcb->local=首包目的。全锥形下 clone 一源一 npcb，
+    // 故对每个源仅触发一次，会话按源二元组建立。仅 NetStack 线程。
     void onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port);
 
 private:
@@ -96,7 +97,7 @@ private:
 
     struct netif lwipNetif;
     struct tcp_pcb *listenPcb;
-    // UDP 捕获所有目的的伪监听 pcb（绑定 netif、bind(NULL,0)，收首包克隆出 connect 的 npcb）。
+    // UDP 捕获所有目的的伪监听 pcb（绑定 netif、bind(NULL,0)，收首包克隆出按源聚合的 npcb）。
     struct udp_pcb *udpListenPcb;
 
     Reactor reactor;
@@ -120,7 +121,7 @@ private:
 
     std::mutex sessionMutex;
     std::unordered_map<struct tcp_pcb *, std::shared_ptr<SessionTcp>> sessions;
-    // UDP 伪会话表：四元组 key -> SessionUdp。仅 NetStack 线程访问，无需加锁。
+    // UDP 会话表：源二元组 key -> SessionUdp。仅 NetStack 线程访问，无需加锁。
     std::unordered_map<std::string, std::shared_ptr<SessionUdp>> udpSessions;
 };
 

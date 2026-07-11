@@ -17,14 +17,12 @@
 
 namespace candy {
 
-SessionUdp::SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort, IP4 origDst, uint16_t origDstPort)
-    : Session(stack), pcb(pcb), fd(-1), origSrc(origSrc), origSrcPort(origSrcPort), origDst(origDst), origDstPort(origDstPort),
+SessionUdp::SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort)
+    : Session(stack), pcb(pcb), fd(-1), origSrc(origSrc), origSrcPort(origSrcPort),
       lastActiveTs(std::chrono::steady_clock::now()) {
-    // 四元组 key：源IP:源端口 -> 目的IP:目的端口
+    // 源二元组 key：源IP:源端口（全锥形下一源一会话，目的 per-packet 不入 key）
     this->sessionKey.assign((const char *)&origSrc, sizeof(uint32_t));
     this->sessionKey.append((const char *)&origSrcPort, sizeof(origSrcPort));
-    this->sessionKey.append((const char *)&origDst, sizeof(uint32_t));
-    this->sessionKey.append((const char *)&origDstPort, sizeof(origDstPort));
 }
 
 SessionUdp::~SessionUdp() {
@@ -38,16 +36,15 @@ int SessionUdp::start() {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     this->self = shared_from_this();
 
-    // 落地拨号：内核 socket 直连（DirectOutbound）。connect 固定对端，内核自动填源
-    // 地址 = 网关 LAN IP（等价 MASQUERADE），形成 Fullcone NAT 伪会话。
+    // 落地拨号：内核 socket 直连（DirectOutbound）。全锥形——unconnected + 固定出口端口，
+    // 后续用 sendto 发往任意目的、recvfrom 收任意对端回包。出口源 IP 由内核填为网关出口 IP。
     Outbound &outbound = this->stack->getOutbound();
-    this->fd = outbound.dialUdp(Endpoint{this->origDst, this->origDstPort});
+    this->fd = outbound.dialUdp();
     if (this->fd < 0) {
         return -1;
     }
 
-    spdlog::debug("session udp: {}:{} -> {}:{}", this->origSrc.toString(), this->origSrcPort, this->origDst.toString(),
-                  this->origDstPort);
+    spdlog::debug("session udp src: {}:{}", this->origSrc.toString(), this->origSrcPort);
 
     auto holder = shared_from_this();
     int fd = this->fd;
@@ -70,22 +67,26 @@ void SessionUdp::recvTrampoline(void *arg, struct udp_pcb *pcb, struct pbuf *p, 
 }
 
 void SessionUdp::onPcbRecv(struct pbuf *p, const ip_addr_t *addr, u16_t port) {
-    // 本流后续数据报：addr/port=源端(dev1)，数据负载转发到落地 fd。
+    // 本流后续数据报：addr/port=源端(dev1)。目的由 lwIP 在回调前覆写进 pcb->local_*，
+    // 必须此刻同步读取（下一入站包会再次覆写），随数据一并按值投递到 reactor。
     if (p == nullptr) {
         return;
     }
+    uint32_t dstIpBe;
+    std::memcpy(&dstIpBe, &ip_2_ip4(&this->pcb->local_ip)->addr, sizeof(uint32_t));
+    uint16_t dstPortHost = this->pcb->local_port; // lwIP 端口为主机序
     std::string data;
     data.resize(p->tot_len);
     pbuf_copy_partial(p, data.data(), p->tot_len, 0);
     pbuf_free(p);
-    sendToLanding(std::move(data));
+    sendToLanding(dstIpBe, dstPortHost, std::move(data));
 }
 
-void SessionUdp::sendToLanding(std::string data) {
-    // 仅 NetStack 线程调用：刷新活跃时间，把数据报投递到 reactor 线程发送。
+void SessionUdp::sendToLanding(uint32_t dstIpBe, uint16_t dstPortHost, std::string data) {
+    // 仅 NetStack 线程调用：刷新活跃时间，把数据报连同目的投递到 reactor 线程用 sendto 发送。
     this->lastActiveTs = std::chrono::steady_clock::now();
     auto holder = shared_from_this();
-    this->stack->getReactor().post([holder, data = std::move(data)]() mutable {
+    this->stack->getReactor().post([holder, dstIpBe, dstPortHost, data = std::move(data)]() mutable {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
         if (holder->closing.load()) {
             return;
@@ -93,17 +94,18 @@ void SessionUdp::sendToLanding(std::string data) {
         if (holder->fd < 0) {
             return;
         }
-        long n = netSend(holder->fd, data.data(), data.size());
+        long n = netSendTo(holder->fd, data.data(), data.size(), dstIpBe, dstPortHost);
         if (n < 0 && !netWouldBlock(netLastError())) {
-            spdlog::debug("session udp send failed: {}", netErrStr(netLastError()));
+            spdlog::debug("session udp sendto failed: {}", netErrStr(netLastError()));
         }
 #endif
     });
 }
 
-void SessionUdp::replyToLwip(std::string data) {
-    // 仅 NetStack 线程调用：把落地回包以 (origDst:origDstPort -> origSrc:origSrcPort)
-    // 重新注入 lwIP，由 netif->output 产生内层 IP 包、再经 NetStack::output 封 IPIP 回源端。
+void SessionUdp::replyToLwip(uint32_t peerIpBe, uint16_t peerPortHost, std::string data) {
+    // 仅 NetStack 线程调用：把落地回包以 (实际对端 -> origSrc:origSrcPort) 重新注入 lwIP，
+    // 由 netif->output 产生内层 IP 包、再经 NetStack::output 封 IPIP 回源端。
+    // 全锥形：回注源用「实际对端」(可为 P2P 对端/STUN)，而非固定落地目的，支撑打洞回包。
     if (this->pcb == nullptr) {
         return;
     }
@@ -116,10 +118,14 @@ void SessionUdp::replyToLwip(std::string data) {
     }
     pbuf_take(p, data.data(), (u16_t)data.size());
 
-    // 源地址固定为落地目的(origDst)，源端口为 origDstPort；目的为源端(origSrc:origSrcPort)。
+    // udp_sendto_if_src 的 UDP 源端口取自 pcb->local_port（非参数），故注入前先写为对端端口。
+    // pretend pcb 的 local_* 不参与入站匹配(只认 remote_*)，且下一正向包会被 lwIP 再次覆写，安全。
+    this->pcb->local_port = peerPortHost;
+
+    // 源地址=实际对端(peerIp:peerPort)；目的=源端(origSrc:origSrcPort)。
     ip_addr_t src;
     ip_addr_t dst;
-    ip_addr_set_ip4_u32(&src, uint32_t(this->origDst));
+    ip_addr_set_ip4_u32(&src, peerIpBe);
     ip_addr_set_ip4_u32(&dst, uint32_t(this->origSrc));
     err_t e = udp_sendto_if_src(this->pcb, p, &dst, this->origSrcPort, &this->stack->getNetif(), &src);
     if (e != ERR_OK) {
@@ -180,11 +186,17 @@ void SessionUdp::onFdReadable() {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     char buf[65536];
     while (true) {
-        long n = netRecv(this->fd, buf, sizeof(buf));
+        // 全锥形：unconnected socket 用 recvfrom 收任意对端回包，同时取回真实对端地址/端口，
+        // 连同数据投递到 NetStack 线程，由 replyToLwip 以该对端为源注入回 dev1（支撑打洞回包）。
+        uint32_t peerIpBe;
+        uint16_t peerPortHost;
+        long n = netRecvFrom(this->fd, buf, sizeof(buf), &peerIpBe, &peerPortHost);
         if (n > 0) {
             std::string data(buf, n);
             auto holder = shared_from_this();
-            this->stack->postToStack([holder, data = std::move(data)]() mutable { holder->replyToLwip(std::move(data)); });
+            this->stack->postToStack([holder, peerIpBe, peerPortHost, data = std::move(data)]() mutable {
+                holder->replyToLwip(peerIpBe, peerPortHost, std::move(data));
+            });
             continue;
         }
         if (n == 0) {
@@ -193,7 +205,8 @@ void SessionUdp::onFdReadable() {
         if (netWouldBlock(netLastError())) {
             return;
         }
-        // 落地 socket 错误（如 ICMP port unreachable 经 connect 返回 ECONNREFUSED）：关闭会话。
+        // 落地 socket 错误：unconnected 下罕见（对称型 connect socket 才会经 ICMP 收到
+        // ECONNREFUSED），保留关闭分支兜底，空闲回收主要交由 reapIdleUdpSessions。
         closeFromReactor();
         return;
     }

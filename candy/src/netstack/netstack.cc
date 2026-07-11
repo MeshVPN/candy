@@ -452,10 +452,11 @@ err_t NetStack::onAccept(struct tcp_pcb *newpcb, err_t err) {
 }
 
 void NetStack::onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
-    // 首包路径：lwIP 已为该流克隆出已 connect 的 npcb（pcb 参数），
-    //   addr/port = 目的(dev2 服务)，pcb->remote_ip/remote_port = 源端(dev1)。
-    // 我们建立伪会话并在 npcb 上注册每流 recv handler，然后**不释放 p**：
-    //   lwIP 收尾会 goto again 把同一数据报按已连接 npcb 重投，交由每流 handler 处理。
+    // 首包路径：lwIP 已为该「源二元组」克隆出 npcb（pcb 参数），
+    //   addr/port = 首包目的，pcb->remote_ip/remote_port = 源端(dev1)。
+    // 全锥形：clone 天然「一源一 npcb」（只按源聚合），故 onUdpRecv 对每个源仅触发一次，
+    //   无需 find-or-create。会话只按源二元组建立；后续各目的由每流 handler 从 pcb->local_*
+    //   per-packet 读取。建会话后**不释放 p**：lwIP 收尾 goto again 把该数据报重投到每流 handler。
     if (p == nullptr) {
         return;
     }
@@ -472,17 +473,19 @@ void NetStack::onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *a
     std::memcpy(&origSrc, &ip_2_ip4(&pcb->remote_ip)->addr, sizeof(uint32_t));
     uint16_t origSrcPort = pcb->remote_port;
 
-    spdlog::debug("netstack onUdpRecv: {}:{} -> {}:{}", origSrc.toString(), origSrcPort, origDst.toString(), origDstPort);
+    // 目的仅用于首包日志（真实目的为 per-packet），会话本体只认源二元组。
+    spdlog::debug("netstack onUdpRecv src {}:{} (first dst {}:{})", origSrc.toString(), origSrcPort, origDst.toString(),
+                  origDstPort);
 
-    auto session = std::make_shared<SessionUdp>(this, pcb, origSrc, origSrcPort, origDst, origDstPort);
+    auto session = std::make_shared<SessionUdp>(this, pcb, origSrc, origSrcPort);
     if (session->start()) {
         udp_recv(pcb, nullptr, nullptr);
         udp_remove(pcb);
         pbuf_free(p);
         return;
     }
-    this->udpSessions[session->key()] = session;
-    // 不释放 p：交还 lwIP（goto again 重投到已连接 npcb 的每流 handler）。
+    this->udpSessions[session->key()] = session; // key = 源二元组
+    // 不释放 p：交还 lwIP（goto again 重投到该 npcb 的每流 handler）。
 }
 
 } // namespace candy

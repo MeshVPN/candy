@@ -45,7 +45,7 @@ int DirectOutbound::dialTcp(const Endpoint &dst) {
 #endif
 }
 
-int DirectOutbound::dialUdp(const Endpoint &dst) {
+int DirectOutbound::dialUdp() {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     int fd = (int)::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -54,14 +54,12 @@ int DirectOutbound::dialUdp(const Endpoint &dst) {
     }
     netSetNonBlocking(fd);
 
-    // connect 固定对端：内核自动填源地址 = 网关 LAN IP（等价 MASQUERADE），
-    // 且后续 send/recv 只与该对端往来，形成 Fullcone NAT 的伪会话。
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(dst.port);
-    addr.sin_addr.s_addr = uint32_t(dst.host);
-    if (::connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        spdlog::warn("direct outbound udp connect {}:{} failed: {}", dst.host.toString(), dst.port, netErrStr(netLastError()));
+    // 全锥形（Full Cone）：不 connect 固定对端。bind(INADDR_ANY,0) 让内核立即分配一个
+    // 固定出口端口，全生命周期不变；对所有目的复用同一 (出口IP,端口)（endpoint-independent
+    // mapping），后续 sendto 发往任意目的、recvfrom 收任意对端回包。出口源 IP 仍由内核按
+    // 默认路由自动填为本网关出口 IP（等价 MASQUERADE）。
+    if (netBindAny(fd) != 0) {
+        spdlog::warn("direct outbound udp bind failed: {}", netErrStr(netLastError()));
         netClose(fd);
         return -1;
     }
