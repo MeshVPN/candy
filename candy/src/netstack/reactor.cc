@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 #include "netstack/reactor.h"
+#include "utils/log.h"
 #include <Poco/Net/PollSet.h>
 #include <Poco/Net/Socket.h>
 #include <Poco/Net/StreamSocketImpl.h>
 #include <Poco/Timespan.h>
-#include <spdlog/spdlog.h>
 
 namespace candy {
 
@@ -199,7 +199,7 @@ void Reactor::drainTasks() {
 }
 
 void Reactor::loop() {
-    spdlog::debug("start thread: netstack reactor");
+    candy::logger().debug("start thread: netstack reactor");
     // poll 超时仅作兜底；跨线程 post/stop 均通过 wakeUp 立即唤醒，不依赖该超时。
     const Poco::Timespan timeout(1, 0); // 1s
     while (this->running.load()) {
@@ -217,7 +217,7 @@ void Reactor::loop() {
         }
         drainTasks();
     }
-    spdlog::debug("stop thread: netstack reactor");
+    candy::logger().debug("stop thread: netstack reactor");
 }
 
 } // namespace candy

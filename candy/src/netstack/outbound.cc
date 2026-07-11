@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "netstack/outbound.h"
 #include "netstack/sockcompat.h"
-#include <spdlog/spdlog.h>
+#include "utils/log.h"
+#include <Poco/Format.h>
 
 // 说明（回应 review：优先用 Poco 封装）：此处属「不得已」而使用平台相关裸 socket。
 // 原因：落地 fd 的生命周期由 Reactor 按裸 int fd 统一管理（注册/注销/关闭），
@@ -23,7 +24,7 @@ int DirectOutbound::dialTcp(const Endpoint &dst) {
     // 建 socket + 非阻塞 + 发起 connect 到 dst。EINPROGRESS 视为成功。
     int fd = (int)::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        spdlog::warn("direct outbound tcp socket failed: {}", netErrStr(netLastError()));
+        candy::logger().warning(Poco::format("direct outbound tcp socket failed: %s", netErrStr(netLastError())));
         return -1;
     }
     netSetNonBlocking(fd);
@@ -35,7 +36,8 @@ int DirectOutbound::dialTcp(const Endpoint &dst) {
 
     int ret = ::connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     if (ret != 0 && !netInProgress(netLastError())) {
-        spdlog::warn("direct outbound tcp connect {}:{} failed: {}", dst.host.toString(), dst.port, netErrStr(netLastError()));
+        candy::logger().warning(Poco::format("direct outbound tcp connect %s:%hu failed: %s", dst.host.toString(), dst.port,
+                                             netErrStr(netLastError())));
         netClose(fd);
         return -1;
     }
@@ -49,7 +51,7 @@ int DirectOutbound::dialUdp() {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     int fd = (int)::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        spdlog::warn("direct outbound udp socket failed: {}", netErrStr(netLastError()));
+        candy::logger().warning(Poco::format("direct outbound udp socket failed: %s", netErrStr(netLastError())));
         return -1;
     }
     netSetNonBlocking(fd);
@@ -59,7 +61,7 @@ int DirectOutbound::dialUdp() {
     // mapping），后续 sendto 发往任意目的、recvfrom 收任意对端回包。出口源 IP 仍由内核按
     // 默认路由自动填为本网关出口 IP（等价 MASQUERADE）。
     if (netBindAny(fd) != 0) {
-        spdlog::warn("direct outbound udp bind failed: {}", netErrStr(netLastError()));
+        candy::logger().warning(Poco::format("direct outbound udp bind failed: %s", netErrStr(netLastError())));
         netClose(fd);
         return -1;
     }

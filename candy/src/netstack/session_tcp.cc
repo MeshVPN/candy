@@ -2,9 +2,10 @@
 #include "netstack/session_tcp.h"
 #include "netstack/netstack.h"
 #include "netstack/sockcompat.h"
+#include "utils/log.h"
+#include <Poco/Format.h>
 #include <algorithm>
 #include <cstring>
-#include <spdlog/spdlog.h>
 
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
@@ -54,7 +55,8 @@ int SessionTcp::start() {
         return -1;
     }
 
-    spdlog::debug("session tcp: {} -> {}:{}", this->origSrc.toString(), this->origDst.toString(), this->origDstPort);
+    candy::logger().debug(
+        Poco::format("session tcp: %s -> %s:%hu", this->origSrc.toString(), this->origDst.toString(), this->origDstPort));
 
     auto holder = shared_from_this();
     int fd = this->fd;
@@ -110,9 +112,9 @@ err_t SessionTcp::onRecv(struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
 
     // 背压埋点(lwIP->fd)：记录本次收量、forwardBuf 积压、当前未确认窗口(pendingRecved)。
     // forwardBuf 应稳定在一个 TCP_WND 内；若持续增长说明落地端写不动、背压失效。
-    spdlog::debug("[bp][fwd] onRecv {} -> {}:{} recv={} forwardBuf={} pendingRecved={} sndwnd={}", this->origSrc.toString(),
-                  this->origDst.toString(), this->origDstPort, recvLen, bufSize, this->pendingRecved.load(),
-                  (this->pcb ? tcp_sndbuf(this->pcb) : 0));
+    candy::logger().debug(Poco::format("[bp][fwd] onRecv %s -> %s:%hu recv=%hu forwardBuf=%zu pendingRecved=%zu sndwnd=%d",
+                                       this->origSrc.toString(), this->origDst.toString(), this->origDstPort, recvLen, bufSize,
+                                       this->pendingRecved.load(), (int)(this->pcb ? tcp_sndbuf(this->pcb) : 0)));
 
     auto holder = shared_from_this();
     this->stack->getReactor().post([holder] { holder->flushForwardLocked(); });
@@ -224,8 +226,9 @@ void SessionTcp::updateReadInterest() {
     if (this->readPaused.load() && this->backwardBytes.load() <= LOW_WATER) {
         this->readPaused.store(false);
         // 背压埋点(fd->lwIP)：积压回落到低水位，恢复读取（水位下降沿，低频事件）。
-        spdlog::debug("[bp][bwd] resume read {}:{} -> {} backwardBytes={} (<=LOW_WATER={})", this->origDst.toString(),
-                      this->origDstPort, this->origSrc.toString(), this->backwardBytes.load(), LOW_WATER);
+        candy::logger().debug(Poco::format("[bp][bwd] resume read %s:%hu -> %s backwardBytes=%zu (<=LOW_WATER=%zu)",
+                                           this->origDst.toString(), this->origDstPort, this->origSrc.toString(),
+                                           this->backwardBytes.load(), LOW_WATER));
         int fd = this->fd;
         auto holder = shared_from_this();
         this->stack->getReactor().post([holder, fd] {
@@ -318,7 +321,7 @@ void SessionTcp::onConnected() {
     int ret = ::getsockopt(this->fd, SOL_SOCKET, SO_ERROR, &err, &len);
 #endif
     if (ret != 0 || err != 0) {
-        spdlog::warn("session tcp connect result error: {}", netErrStr(err ? err : netLastError()));
+        candy::logger().warning(Poco::format("session tcp connect result error: %s", netErrStr(err ? err : netLastError())));
         closeFromReactor();
         return;
     }
@@ -364,8 +367,9 @@ void SessionTcp::flushForwardLocked() {
     // 背压埋点(lwIP->fd)：记录本次写进落地 fd 的字节、剩余积压、是否因 fd 写满而背压。
     // blocked=true 表示落地端写满(EAGAIN)，forwardBuf 残留并等待 onFdWritable 续写；
     // 此时不向 lwIP 确认残留部分，源端接收窗口收紧 -> 自动减速，这正是背压生效的体现。
-    spdlog::debug("[bp][fwd] flush {} -> {}:{} wrote={} remain={} blocked={} pendingRecved->{}", this->origSrc.toString(),
-                  this->origDst.toString(), this->origDstPort, acked, remain, blocked, this->pendingRecved.load() + acked);
+    candy::logger().debug(Poco::format("[bp][fwd] flush %s -> %s:%hu wrote=%zu remain=%zu blocked=%d pendingRecved->%zu",
+                                       this->origSrc.toString(), this->origDst.toString(), this->origDstPort, acked, remain,
+                                       (int)blocked, this->pendingRecved.load() + acked));
     // 已落地的字节交由 NetStack 线程向 lwIP 确认（推进接收窗口）。
     // 这才是真正的"收到"，从而把源端发送速率约束在落地 fd 的消费能力之内。
     if (acked > 0) {
@@ -389,8 +393,9 @@ void SessionTcp::onFdReadable() {
         if (this->backwardBytes.load() >= HIGH_WATER) {
             this->readPaused.store(true);
             // 背压埋点(fd->lwIP)：积压达到高水位，停止读取（水位上升沿，低频事件）。
-            spdlog::debug("[bp][bwd] pause read {}:{} -> {} backwardBytes={} (>=HIGH_WATER={})", this->origDst.toString(),
-                          this->origDstPort, this->origSrc.toString(), this->backwardBytes.load(), HIGH_WATER);
+            candy::logger().debug(Poco::format("[bp][bwd] pause read %s:%hu -> %s backwardBytes=%zu (>=HIGH_WATER=%zu)",
+                                               this->origDst.toString(), this->origDstPort, this->origSrc.toString(),
+                                               this->backwardBytes.load(), HIGH_WATER));
             this->stack->getReactor().mod(this->fd, ReactorEvent::NONE);
             return;
         }

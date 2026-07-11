@@ -4,10 +4,11 @@
 #include "core/message.h"
 #include "netstack/session_tcp.h"
 #include "netstack/session_udp.h"
+#include "utils/log.h"
+#include <Poco/Format.h>
 #include <chrono>
 #include <cstring>
 #include <mutex>
-#include <spdlog/spdlog.h>
 #include <vector>
 
 #include "lwip/init.h"
@@ -54,29 +55,29 @@ int NetStack::run(Client *client) {
     this->running.store(true);
 
     if (this->reactor.start()) {
-        spdlog::critical("netstack reactor start failed");
+        candy::logger().fatal("netstack reactor start failed");
         return -1;
     }
 
     this->stackThread = std::thread([this] {
-        spdlog::debug("start thread: netstack");
+        candy::logger().debug("start thread: netstack");
         try {
             if (initStack()) {
-                spdlog::critical("netstack init failed");
+                candy::logger().fatal("netstack init failed");
                 getClient()->shutdown();
             } else {
                 loop();
                 teardownStack();
             }
         } catch (const std::exception &e) {
-            spdlog::error("netstack thread exception: {}", e.what());
+            candy::logger().error(Poco::format("netstack thread exception: %s", std::string(e.what())));
             getClient()->shutdown();
         }
-        spdlog::debug("stop thread: netstack");
+        candy::logger().debug("stop thread: netstack");
     });
 
     this->msgThread = std::thread([this] {
-        spdlog::debug("start thread: netstack msg");
+        candy::logger().debug("start thread: netstack msg");
         try {
             while (getClient()->isRunning()) {
                 if (handleQueue()) {
@@ -85,10 +86,10 @@ int NetStack::run(Client *client) {
             }
             getClient()->shutdown();
         } catch (const std::exception &e) {
-            spdlog::error("netstack msg thread exception: {}", e.what());
+            candy::logger().error(Poco::format("netstack msg thread exception: %s", std::string(e.what())));
             getClient()->shutdown();
         }
-        spdlog::debug("stop thread: netstack msg");
+        candy::logger().debug("stop thread: netstack msg");
     });
     return 0;
 }
@@ -116,7 +117,7 @@ int NetStack::handleQueue() {
         input(std::move(msg.data));
         break;
     default:
-        spdlog::warn("unexcepted netstack message type: {}", static_cast<int>(msg.kind));
+        candy::logger().warning(Poco::format("unexcepted netstack message type: %d", static_cast<int>(msg.kind)));
         break;
     }
     return 0;
@@ -156,7 +157,7 @@ int NetStack::initStack() {
     ip4_addr_set_any(&gw);
 
     if (netif_add(&this->lwipNetif, &addr, &mask, &gw, this, netifInitTrampoline, ip_input) == nullptr) {
-        spdlog::critical("netstack netif_add failed");
+        candy::logger().fatal("netstack netif_add failed");
         return -1;
     }
     netif_set_up(&this->lwipNetif);
@@ -175,17 +176,17 @@ int NetStack::initStack() {
 
     struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
     if (pcb == nullptr) {
-        spdlog::critical("netstack tcp_new failed");
+        candy::logger().fatal("netstack tcp_new failed");
         return -1;
     }
     tcp_bind_netif(pcb, &this->lwipNetif);
     if (tcp_bind(pcb, nullptr, 0) != ERR_OK) {
-        spdlog::critical("netstack tcp_bind failed");
+        candy::logger().fatal("netstack tcp_bind failed");
         return -1;
     }
     this->listenPcb = tcp_listen(pcb);
     if (this->listenPcb == nullptr) {
-        spdlog::critical("netstack tcp_listen failed");
+        candy::logger().fatal("netstack tcp_listen failed");
         return -1;
     }
     tcp_arg(this->listenPcb, this);
@@ -196,12 +197,12 @@ int NetStack::initStack() {
     // 已 connect 源端的 npcb 并通过回调交给我们，由此建立四元组伪会话。
     this->udpListenPcb = udp_new_ip_type(IPADDR_TYPE_ANY);
     if (this->udpListenPcb == nullptr) {
-        spdlog::critical("netstack udp_new failed");
+        candy::logger().fatal("netstack udp_new failed");
         return -1;
     }
     udp_bind_netif(this->udpListenPcb, &this->lwipNetif);
     if (udp_bind(this->udpListenPcb, nullptr, 0) != ERR_OK) {
-        spdlog::critical("netstack udp_bind failed");
+        candy::logger().fatal("netstack udp_bind failed");
         return -1;
     }
     udp_recv(this->udpListenPcb, udpRecvTrampoline, this);
@@ -288,7 +289,8 @@ void NetStack::reapIdleUdpSessions() {
         }
     }
     if (reaped > 0) {
-        spdlog::debug("netstack reap idle udp sessions: {} reaped, {} remain", reaped, this->udpSessions.size());
+        candy::logger().debug(
+            Poco::format("netstack reap idle udp sessions: %d reaped, %zu remain", reaped, this->udpSessions.size()));
     }
 }
 
@@ -306,8 +308,8 @@ void NetStack::handleInput(std::string packet) {
         return;
     }
     IP4Header *inner = (IP4Header *)packet.data();
-    spdlog::debug("netstack input: vnetPeer={} {} -> {} proto={}", vnetPeer.toString(), inner->saddr.toString(),
-                  inner->daddr.toString(), (int)inner->protocol);
+    candy::logger().debug(Poco::format("netstack input: vnetPeer=%s %s -> %s proto=%d", vnetPeer.toString(),
+                                       inner->saddr.toString(), inner->daddr.toString(), (int)inner->protocol));
     // 本次增量发版仅支持 userspace TCP/UDP 组网：非 TCP(0x06)/UDP(0x11) 一律丢弃
     // （ICMP 等待后续迭代再支持；PRETEND netif 本也只接受 TCP/UDP）。
     if (inner->protocol != 0x06 && inner->protocol != 0x11) {
@@ -336,13 +338,13 @@ void NetStack::feedToLwip(const std::string &innerPacket, IP4 vnetPeer) {
 
     struct pbuf *p = pbuf_alloc(PBUF_RAW, innerPacket.size(), PBUF_RAM);
     if (p == nullptr) {
-        spdlog::warn("netstack pbuf_alloc failed");
+        candy::logger().warning("netstack pbuf_alloc failed");
         return;
     }
     pbuf_take(p, innerPacket.data(), innerPacket.size());
     err_t e = this->lwipNetif.input(p, &this->lwipNetif);
     if (e != ERR_OK) {
-        spdlog::warn("netstack netif.input failed: {}", (int)e);
+        candy::logger().warning(Poco::format("netstack netif.input failed: %d", (int)e));
         pbuf_free(p);
     }
 }
@@ -362,7 +364,7 @@ void NetStack::output(const std::string &innerPacket) {
         }
     }
     if (vnetPeer.empty()) {
-        spdlog::warn("netstack output drop: no vnetPeer for {}", inner->daddr.toString());
+        candy::logger().warning(Poco::format("netstack output drop: no vnetPeer for %s", inner->daddr.toString()));
         return;
     }
 
@@ -424,15 +426,15 @@ err_t NetStack::onOutput(struct netif *netif, struct pbuf *p, const ip4_addr_t *
     pbuf_copy_partial(p, buffer.data(), p->tot_len, 0);
     if (buffer.size() >= sizeof(IP4Header)) {
         IP4Header *h = (IP4Header *)buffer.data();
-        spdlog::debug("netstack onOutput: {} -> {} proto={} len={}", h->saddr.toString(), h->daddr.toString(), (int)h->protocol,
-                      buffer.size());
+        candy::logger().debug(Poco::format("netstack onOutput: %s -> %s proto=%d len=%zu", h->saddr.toString(),
+                                           h->daddr.toString(), (int)h->protocol, buffer.size()));
     }
     output(buffer);
     return ERR_OK;
 }
 
 err_t NetStack::onAccept(struct tcp_pcb *newpcb, err_t err) {
-    spdlog::debug("netstack onAccept: err={} pcb={}", (int)err, (void *)newpcb);
+    candy::logger().debug(Poco::format("netstack onAccept: err=%d pcb=%p", (int)err, (void *)newpcb));
     if (err != ERR_OK || newpcb == nullptr) {
         return ERR_VAL;
     }
@@ -474,8 +476,8 @@ void NetStack::onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *a
     uint16_t origSrcPort = pcb->remote_port;
 
     // 目的仅用于首包日志（真实目的为 per-packet），会话本体只认源二元组。
-    spdlog::debug("netstack onUdpRecv src {}:{} (first dst {}:{})", origSrc.toString(), origSrcPort, origDst.toString(),
-                  origDstPort);
+    candy::logger().debug(Poco::format("netstack onUdpRecv src %s:%hu (first dst %s:%hu)", origSrc.toString(), origSrcPort,
+                                       origDst.toString(), origDstPort));
 
     auto session = std::make_shared<SessionUdp>(this, pcb, origSrc, origSrcPort);
     if (session->start()) {

@@ -16,8 +16,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
-#include <arpa/inet.h>  // htons/ntohs（无连接收发的端口字节序转换）
-#include <cerrno>       // errno 是 C 标准库唯一入口，无 C++ 等价，属不得已保留。
+#include <arpa/inet.h> // htons/ntohs（无连接收发的端口字节序转换）
+#include <cerrno>      // errno 是 C 标准库唯一入口，无 C++ 等价，属不得已保留。
 #include <fcntl.h>
 #include <netinet/in.h> // struct sockaddr_in / INADDR_ANY（无连接收发地址组装）
 #include <sys/socket.h>

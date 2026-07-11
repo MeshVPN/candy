@@ -2,8 +2,9 @@
 #include "netstack/session_udp.h"
 #include "netstack/netstack.h"
 #include "netstack/sockcompat.h"
+#include "utils/log.h"
+#include <Poco/Format.h>
 #include <cstring>
-#include <spdlog/spdlog.h>
 
 #include "lwip/pbuf.h"
 #include "lwip/udp.h"
@@ -44,7 +45,7 @@ int SessionUdp::start() {
         return -1;
     }
 
-    spdlog::debug("session udp src: {}:{}", this->origSrc.toString(), this->origSrcPort);
+    candy::logger().debug(Poco::format("session udp src: %s:%hu", this->origSrc.toString(), this->origSrcPort));
 
     auto holder = shared_from_this();
     int fd = this->fd;
@@ -96,7 +97,7 @@ void SessionUdp::sendToLanding(uint32_t dstIpBe, uint16_t dstPortHost, std::stri
         }
         long n = netSendTo(holder->fd, data.data(), data.size(), dstIpBe, dstPortHost);
         if (n < 0 && !netWouldBlock(netLastError())) {
-            spdlog::debug("session udp sendto failed: {}", netErrStr(netLastError()));
+            candy::logger().debug(Poco::format("session udp sendto failed: %s", netErrStr(netLastError())));
         }
 #endif
     });
@@ -113,7 +114,7 @@ void SessionUdp::replyToLwip(uint32_t peerIpBe, uint16_t peerPortHost, std::stri
 
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)data.size(), PBUF_RAM);
     if (p == nullptr) {
-        spdlog::warn("session udp reply pbuf_alloc failed");
+        candy::logger().warning("session udp reply pbuf_alloc failed");
         return;
     }
     pbuf_take(p, data.data(), (u16_t)data.size());
@@ -129,7 +130,7 @@ void SessionUdp::replyToLwip(uint32_t peerIpBe, uint16_t peerPortHost, std::stri
     ip_addr_set_ip4_u32(&dst, uint32_t(this->origSrc));
     err_t e = udp_sendto_if_src(this->pcb, p, &dst, this->origSrcPort, &this->stack->getNetif(), &src);
     if (e != ERR_OK) {
-        spdlog::debug("session udp udp_sendto_if_src failed: {}", (int)e);
+        candy::logger().debug(Poco::format("session udp udp_sendto_if_src failed: %d", (int)e));
     }
     pbuf_free(p);
 }
