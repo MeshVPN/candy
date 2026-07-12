@@ -3,11 +3,11 @@ name: flutter
 # 跨平台 UI 客户端发布：一套 Dart 代码 × 三个原生 runner。
 # 每个 runner 各自：① 编 candy_ffi 动态库（CMake）② flutter create 补平台样板
 # ③ flutter build 出各平台产物 ④ 把动态库塞进 App 可加载路径 ⑤ 打包上传。
-# push 到 master 做冒烟构建；release published 时把产物挂到 Release。
+# push 到 master/api 做冒烟构建；release published 时把产物挂到 Release。
 
 on:
   push:
-    branches: [master]
+    branches: [master, api]
     paths:
       - 'clients/flutter/**'
       - 'candy/**'
