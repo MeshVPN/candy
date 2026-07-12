@@ -2,6 +2,8 @@
 #include "candy/server.h"
 #include "core/server.h"
 #include "utils/atomic.h"
+#include <chrono>
+#include <thread>
 
 namespace candy {
 namespace server {

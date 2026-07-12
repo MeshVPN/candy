@@ -57,11 +57,16 @@ jobs:
         run: |
           APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)
           echo "app bundle: $APP"
-          mkdir -p "$APP/Contents/Frameworks"
-          cp "$GITHUB_WORKSPACE/build/libcandy_ffi.dylib" "$APP/Contents/Frameworks/"
-          # 塞入 dylib 改动了 bundle 内容，flutter 之前的 ad-hoc 签名随即失效，
-          # 直接运行会报“已损坏”。故重新 ad-hoc 签名：先签内部 dylib，再整包封印。
-          codesign --force -s - "$APP/Contents/Frameworks/libcandy_ffi.dylib"
+          FW="$APP/Contents/Frameworks"
+          mkdir -p "$FW"
+          cp "$GITHUB_WORKSPACE/build/libcandy_ffi.dylib" "$FW/"
+          # candy_ffi 硬链了一串 Homebrew 的 Poco/openssl 绝对路径依赖，目标机没装
+          # Homebrew 会加载失败。把这些依赖递归内嵌进 Frameworks/ 并改写为 @rpath，
+          # 使 .app 自包含（等价于 Windows/Linux 侧 search-deps.sh 的角色）。
+          "$GITHUB_WORKSPACE/scripts/bundle-macos-deps.sh" "$FW/libcandy_ffi.dylib" "$FW"
+          # 改依赖会使 flutter 原本的 ad-hoc 签名及各 Homebrew 库签名失效，直接运行
+          # 会报“已损坏”。故重新 ad-hoc 签名：先逐个签内部 dylib，再整包封印。
+          for dylib in "$FW"/*.dylib; do codesign --force -s - "$dylib"; done
           codesign --force --deep -s - "$APP"
           # 打成 DMG 分发（拖入 Applications 的标准体验，比 zip 更规范）。
           mkdir -p "$GITHUB_WORKSPACE/artifact"
