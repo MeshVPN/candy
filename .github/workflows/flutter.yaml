@@ -59,22 +59,27 @@ jobs:
           echo "app bundle: $APP"
           mkdir -p "$APP/Contents/Frameworks"
           cp "$GITHUB_WORKSPACE/build/libcandy_ffi.dylib" "$APP/Contents/Frameworks/"
-          # 打成 zip 便于上传（保留 .app 目录结构与可执行权限）。
+          # 塞入 dylib 改动了 bundle 内容，flutter 之前的 ad-hoc 签名随即失效，
+          # 直接运行会报“已损坏”。故重新 ad-hoc 签名：先签内部 dylib，再整包封印。
+          codesign --force -s - "$APP/Contents/Frameworks/libcandy_ffi.dylib"
+          codesign --force --deep -s - "$APP"
+          # 打成 DMG 分发（拖入 Applications 的标准体验，比 zip 更规范）。
           mkdir -p "$GITHUB_WORKSPACE/artifact"
-          ditto -c -k --keepParent "$APP" "$GITHUB_WORKSPACE/artifact/candy-macos.zip"
+          hdiutil create -volname Candy -srcfolder "$APP" -ov -format UDZO \
+            "$GITHUB_WORKSPACE/artifact/candy-macos.dmg"
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: candy-ui-macos-${{ github.event.release.tag_name || github.sha }}
-          path: artifact/candy-macos.zip
+          path: artifact/candy-macos.dmg
       - name: set release package name
         if: github.event_name == 'release'
         run: |
           GIT_TAG=${{ github.event.release.tag_name }}
-          echo "PKG=candy-ui_${GIT_TAG#v}+macos.zip" >> $GITHUB_ENV
+          echo "PKG=candy-ui_${GIT_TAG#v}+macos.dmg" >> $GITHUB_ENV
       - name: rename for release
         if: github.event_name == 'release'
-        run: mv artifact/candy-macos.zip "artifact/${{ env.PKG }}"
+        run: mv artifact/candy-macos.dmg "artifact/${{ env.PKG }}"
       - name: upload release
         uses: softprops/action-gh-release@v2
         if: github.event_name == 'release'
@@ -118,9 +123,16 @@ jobs:
       - name: bundle dll and deps
         shell: msys2 {0}
         run: |
-          OUT=$(find "$FLUTTER_DIR/build/windows" -type d -name Release | grep -i runner | head -n1)
+          # flutter build windows 用 MSBuild，真正的 exe 在 x64/runner/Release，
+          # 但同级还有 ALL_BUILD.dir/Release、candy.dir/Release 等 CMake 中间目录，
+          # 之前 `find -name Release | grep runner` 会错配到 .dir 里。精确定位：
+          # runner 下深度为 1 的 Release，且路径不含 .dir。
+          OUT=$(find "$FLUTTER_DIR/build/windows/x64/runner" -maxdepth 1 -type d -name Release | head -n1)
           echo "runner release dir: $OUT"
-          cp build/candy_ffi.dll "$OUT/"
+          # CMake 已对 WIN32 去掉 lib 前缀产出 candy_ffi.dll；仍兜底匹配以防万一。
+          DLL=$(find build -maxdepth 2 -name 'candy_ffi.dll' -o -name 'libcandy_ffi.dll' | head -n1)
+          echo "candy_ffi dll: $DLL"
+          cp "$DLL" "$OUT/candy_ffi.dll"
           # MinGW 运行库随 dll 一起分发，避免目标机缺 libgcc/libstdc++/winpthread。
           scripts/search-deps.sh "$OUT/candy_ffi.dll" "$OUT" || true
           mkdir -p artifact

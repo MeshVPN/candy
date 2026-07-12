@@ -81,7 +81,14 @@ dart run tool/e2e_connect.dart /abs/build-mac/libcandy_ffi.dylib ws://127.0.0.1:
 
 ## 六、跨平台发布（GitHub Actions）
 
-`.github/workflows/flutter.yaml`：一套 Dart 代码 × 三个原生 runner。每个 runner 各自 ① CMake 编 `candy_ffi` 动态库 ② `flutter create` 补平台样板 ③ `flutter build` 出产物 ④ 把动态库塞进 App 可加载路径（mac `Contents/Frameworks/`、Linux `bundle/lib/`、Windows exe 同目录）⑤ 打包上传。`push master` 冒烟构建，`release published` 时把 zip/tar.gz 挂到 Release。`_libraryPath()` 已相对可执行文件定位，与打包路径一致。
+`.github/workflows/flutter.yaml`：一套 Dart 代码 × 三个原生 runner。每个 runner 各自 ① CMake 编 `candy_ffi` 动态库 ② `flutter create` 补平台样板 ③ `flutter build` 出产物 ④ 把动态库塞进 App 可加载路径（mac `Contents/Frameworks/`、Linux `bundle/lib/`、Windows exe 同目录）⑤ 打包上传（mac 出 **DMG**、Linux `tar.gz`、Windows `zip`）。`push master`/`api` 冒烟构建，`release published` 时把产物挂到 Release。`_libraryPath()` 已相对可执行文件定位，与打包路径一致。
+
+> **macOS 打开 DMG 里的 app 提示“已损坏，无法打开”**：因未做 Apple 公证（无开发者账号），经浏览器下载的 app 会被系统打上隔离属性（`com.apple.quarantine`），Gatekeeper 直接拦截并误报“已损坏”。DMG 内的 app 已在 CI 里做过 ad-hoc 重签名（塞入 dylib 会使 flutter 的原签名失效，必须重签，否则 Apple Silicon 上无法运行），只需清除隔离属性即可打开：
+>
+> ```bash
+> # 把 app 拖进“应用程序”后执行（路径按实际调整）
+> xattr -cr /Applications/candy.app
+> ```
 
 ## 说明与后续
 

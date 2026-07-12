@@ -109,6 +109,11 @@ if (${CANDY_SHARED})
     # 传递，故显式补 Foundation+JSON 的 include；核心逻辑仍由 Candy::Library 提供。
     target_link_libraries(candy_shared PRIVATE Candy::Library Poco::Foundation Poco::JSON)
     set_target_properties(candy_shared PROPERTIES OUTPUT_NAME "candy_ffi")
+    # MinGW/GCC 编 SHARED 库默认加 lib 前缀，产出 libcandy_ffi.dll；而 Windows 侧
+    # dart:ffi 按 candy_ffi.dll 加载。去掉前缀让三端产物命名与绑定层一致。
+    if (WIN32)
+        set_target_properties(candy_shared PROPERTIES PREFIX "")
+    endif()
     # 链入动态库的静态库都必须是位置无关代码。macOS 默认即 PIC 可容错，但 Linux
     # （尤其 aarch64）会因 lwIP 非 PIC 而报 relocation 错误，故显式对相关静态库开启。
     set_property(TARGET candy-library PROPERTY POSITION_INDEPENDENT_CODE ON)
