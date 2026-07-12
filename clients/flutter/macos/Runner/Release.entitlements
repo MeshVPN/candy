@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 关闭沙盒：需要 osascript 提权安装特权 daemon、拷贝文件到 /Library、launchctl 加载，
+	     这些操作在沙盒内被禁止。ClashX/Tunnelblick 等特权 Helper 方案同样不启用沙盒。 -->
+	<!-- 允许出站网络：GUI 通过 HTTP 连接本机 daemon (localhost:26817)。 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

@@ -1,5 +1,5 @@
 name: candy
-description: Candy 跨平台客户端（Flutter 桌面骨架，dart:ffi 集成 C ABI 核心库）。
+description: Candy 跨平台客户端（Flutter 桌面 GUI，通过 HTTP 驱动 root daemon）。
 publish_to: none
 version: 0.1.0
 
@@ -10,7 +10,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  ffi: ^2.1.0
 
 dev_dependencies:
   flutter_lints: ^3.0.0

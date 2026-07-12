@@ -1,6 +1,19 @@
-# Candy Flutter 客户端骨架（macOS 桌面）
+# Candy Flutter 客户端（macOS 桌面）
 
-dart:ffi 集成 candy C ABI 核心库（`candy/include/candy/capi.h`）的最小客户端：连接 / 断开 / 状态查询闭环。
+Flutter GUI + 特权 daemon 架构的 candy 桌面客户端：连接 / 断开 / 状态查询闭环。
+
+## 架构
+
+```
+Flutter GUI(普通用户) ──HTTP(localhost:26817)──► candy-service(root daemon) ──► candy 核心 ──► 建 utun
+```
+
+建 utun 是特权操作，普通用户进程无权直接建网卡。方案参照 ClashX / Tunnelblick：
+把项目里现成的 `candy-service`（Poco HTTP 守护进程）装成 root 的 **LaunchDaemon** 常驻，
+GUI 以普通用户身份通过 localhost HTTP 驱动它。首次连接时用 `osascript` 触发一次系统
+授权把 daemon 装好，之后开机自启、永久免密。
+
+> 全程 **不改核心 C++**：GUI 只是 HTTP 调用方，`candy-service` 与 candy 核心均为现成代码。
 
 ## 目录
 
@@ -8,82 +21,82 @@ dart:ffi 集成 candy C ABI 核心库（`candy/include/candy/capi.h`）的最小
 clients/flutter/
 ├── pubspec.yaml
 ├── lib/
-│   ├── candy_bindings.dart   # dart:ffi 裸绑定，一一对应 capi.h
-│   ├── candy_service.dart    # 业务封装：字符串编解码 / 内存释放 / JSON
-│   └── main.dart             # 连接/断开/状态查询 UI
+│   ├── candy_daemon_client.dart  # daemon HTTP 通信层（/api/run /api/status /api/shutdown）
+│   ├── candy_service.dart        # 业务封装：config 补全 / vmac 生成 / 状态解析
+│   ├── daemon_installer.dart     # 纯 Dart 提权安装器（osascript + LaunchDaemon）
+│   └── main.dart                 # 连接/断开/状态查询 UI
+├── macos/                        # 平台工程（含定制 entitlements：关沙盒、开出站网），已提交
 └── tool/
-    ├── ffi_smoke.dart        # 只读接口冒烟（version/vmac/status）
-    └── e2e_connect.dart      # 端到端可用性：真连服务端拿下发地址
+    └── e2e_connect.dart          # 端到端可用性：经 daemon 真连服务端拿下发地址
 ```
 
-> 本目录只含**可控核心**（FFI + UI）。`macos/` 等平台样板目录未手写，需用 `flutter create` 补全（见下）。
+## 一、编译 candy-service（在仓库根 `candy/`）
 
-## 一、编译 native 动态库（在本仓库根 `candy/`）
+daemon 就是核心自带的 `candy-service` 可执行文件，默认即构建目标：
 
-三个桌面平台共用同一开关 `-DCANDY_SHARED=ON`，Dart 侧按平台名自动加载，代码零改动复用：
-
-| 平台    | 构建命令（仓库根执行）                                                                                                            | 产物                            |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| macOS   | `cmake -S . -B build-mac -DCANDY_SHARED=ON -DCANDY_NETSTACK=ON && cmake --build build-mac --target candy_shared -j`             | `build-mac/libcandy_ffi.dylib`  |
-| Linux   | `cmake -S . -B build-linux -DCANDY_SHARED=ON -DCANDY_NETSTACK=ON && cmake --build build-linux --target candy_shared -j`         | `build-linux/libcandy_ffi.so`   |
-| Windows | `cmake -S . -B build-win -DCANDY_SHARED=ON -DCANDY_NETSTACK=ON && cmake --build build-win --target candy_shared --config Release` | `build-win/Release/candy_ffi.dll` |
-
-三端产物均导出同一组 `candy_*` 符号（`extern "C"`，无名字修饰），`candy_bindings.dart` 的 `_libraryPath()` 已按
-`libcandy_ffi.dylib` / `libcandy_ffi.so` / `candy_ffi.dll` 命名匹配。
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCANDY_NETSTACK=ON
+cmake --build build --target candy-service
+# 产物：build/candy-service/candy-service
+```
 
 `CANDY_NETSTACK=ON` 提供 userspace lwIP 栈；桌面 userspace 模式必需。
 
-> **Linux（尤其 aarch64）**：链入动态库的静态库须为位置无关代码，顶层 CMake 已对 `candy-library` 与 `lwip` 开启
-> `POSITION_INDEPENDENT_CODE`（macOS 默认容错、Windows 该属性无意义，均无副作用）。
-> **Windows**：`candy-library` 的 `ws2_32`/`iphlpapi` 及 Poco/OpenSSL 虽是 PRIVATE 依赖，但对静态库会以 LINK_ONLY
-> 传递给 `candy_shared`，无需额外配置；wintun 为运行时 `LoadLibraryExW` 加载，非链接期依赖，不影响 .dll 产出。
+## 二、本机开发运行
 
-## 二、补全 Flutter macOS 平台样板
-
-本机若未装 Flutter，先安装 Flutter SDK，然后在本目录执行：
+需要本机装有完整 Xcode + CocoaPods（`flutter build/run macos` 依赖）。
 
 ```bash
 cd clients/flutter
-flutter create --platforms=macos --project-name candy .
 flutter pub get
-```
-
-`flutter create` 只会补 `macos/` 等缺失目录，不会覆盖已存在的 `lib/` 与 `pubspec.yaml`。
-
-## 三、让 App 找到动态库
-
-`CandyBindings.open()` 用 `DynamicLibrary.open('libcandy_ffi.dylib')` 按名加载，需让 dylib 位于 App 可搜索路径。开发期最简单：把 dylib 拷到构建产物同目录，或在 Xcode 的 Runner target 加 “Copy Files” 阶段把 `libcandy_ffi.dylib` 放进 `Contents/Frameworks/` 并设 rpath。
-
-开发期快速验证也可临时改 `candy_bindings.dart` 里 `_libraryPath()` 返回 dylib 绝对路径。
-
-## 四、运行
-
-```bash
+# 开发期把 build 产物路径告诉安装器，免去把二进制塞进 .app：
+export CANDY_SERVICE_BIN=/abs/path/to/build/candy-service/candy-service
 flutter run -d macos
 ```
 
-填 WebSocket 地址与密码，点“连接”，状态卡每 2s 轮询 `candy_status` 显示分配到的地址。
+填 WebSocket 地址与密码，点“连接”：
+- daemon 未安装时会弹一次系统授权框，把 `candy-service` 装成 LaunchDaemon；
+- 之后 GUI 通过 `localhost:26817` 驱动它建 utun，状态卡每 2s 轮询显示分配到的地址。
 
-## 五、无 GUI 验证可用性（不依赖 Xcode/CocoaPods）
+> `macos/` 平台工程（含定制 entitlements）已提交，**不要**再 `flutter create`，会覆盖定制。
 
-本机若缺完整 Xcode，无法 `flutter build/run macos`，可用纯 Dart 脚本验证「Dart 复用 native 库 + 真实连接」这条核心链路：
+## 三、无 GUI 验证可用性（不依赖 Xcode）
+
+本机若缺完整 Xcode 无法 `flutter build macos`，可用纯 Dart 脚本验证「Dart → daemon →
+真实连接」这条核心链路（与 GUI 共用同一套 `CandyService` API）。
+
+先以 root 起 daemon（建 utun 需特权），再跑脚本：
 
 ```bash
-# 1) 只读接口冒烟
-dart run tool/ffi_smoke.dart /abs/build-mac/libcandy_ffi.dylib
+# 1) root 起 daemon
+sudo ./build/candy-service/candy-service --bind=127.0.0.1:26817 --loglevel=info
 
-# 2) 端到端连接（另开终端起一个本地 DHCP 服务端）
-./build-mac/candy-cli/candy -m server -w ws://127.0.0.1:18899 -p e2e-secret -d 10.99.0.0/24
-dart run tool/e2e_connect.dart /abs/build-mac/libcandy_ffi.dylib ws://127.0.0.1:18899 e2e-secret 10.99.0.
+# 2) 另开终端：作为 DHCP 客户端连接，拿到服务端下发地址即证明鉴权往返成功
+dart run tool/e2e_connect.dart <ws地址> <密码> [期望地址前缀]
 ```
 
-`e2e_connect.dart` 走的是 GUI 同一套 `CandyService` API：作为 DHCP 客户端连接，`candy_status` 拿到服务端从地址池下发的地址即证明 WebSocket 鉴权往返成功（地址在建 tun 设备前就已拿到，**全程无需 root**）。期望输出 `E2E_OK`。
+期望输出 `E2E_OK`。
 
-## 六、跨平台发布（GitHub Actions）
+## 四、发布打包（GitHub Actions）
 
-`.github/workflows/flutter.yaml`：一套 Dart 代码 × 三个原生 runner。每个 runner 各自 ① CMake 编 `candy_ffi` 动态库 ② `flutter create` 补平台样板 ③ `flutter build` 出产物 ④ 把动态库塞进 App 可加载路径（mac `Contents/Frameworks/`、Linux `bundle/lib/`、Windows exe 同目录）⑤ 打包上传（mac 出 **DMG**、Linux `tar.gz`、Windows `zip`）。`push master`/`api` 冒烟构建，`release published` 时把产物挂到 Release。`_libraryPath()` 已相对可执行文件定位，与打包路径一致。
+`.github/workflows/flutter.yaml` 的 macOS job：
 
-> **macOS 打开 DMG 里的 app 提示“已损坏，无法打开”**：因未做 Apple 公证（无开发者账号），经浏览器下载的 app 会被系统打上隔离属性（`com.apple.quarantine`），Gatekeeper 直接拦截并误报“已损坏”。DMG 内的 app 已在 CI 里做过 ad-hoc 重签名（塞入 dylib 会使 flutter 的原签名失效，必须重签，否则 Apple Silicon 上无法运行），只需清除隔离属性即可打开：
+1. `brew install` 依赖，CMake 编 `candy-service`；
+2. `flutter build macos --release` 出 `.app`（用仓库里已提交的 `macos/` 工程与 entitlements，
+   **不** `flutter create`）；
+3. 把 `candy-service` 塞进 `<App>.app/Contents/Resources/`，用 `scripts/bundle-macos-deps.sh`
+   递归内嵌它的 Homebrew 依赖到 `Contents/Frameworks/` 并改写为 `@rpath`，补一条
+   `@executable_path/../Frameworks` 的 LC_RPATH，使其脱离 Homebrew 自包含；
+4. 逐个 dylib + candy-service + 整包 ad-hoc 重签名（改依赖会使原签名失效）；
+5. `hdiutil` 打成 DMG 上传。`release published` 时把产物挂到 Release。
+
+安装器 `daemon_installer.dart` 的 `locateBundledBinary()` 打包期会从
+`<App>.app/Contents/Resources/candy-service` 找到随包二进制，提权拷到
+`/Library/Application Support/Candy/` 并注册 LaunchDaemon。
+
+> **打开 DMG 里的 app 提示“已损坏，无法打开”**：因未做 Apple 公证（无开发者账号），
+> 经浏览器下载的 app 会被打上隔离属性（`com.apple.quarantine`），Gatekeeper 误报“已损坏”。
+> app 已在 CI 里 ad-hoc 重签名，只需清除隔离属性即可打开：
 >
 > ```bash
 > # 把 app 拖进“应用程序”后执行（路径按实际调整）
@@ -92,6 +105,7 @@ dart run tool/e2e_connect.dart /abs/build-mac/libcandy_ffi.dylib ws://127.0.0.1:
 
 ## 说明与后续
 
-- macOS userspace tun 需相应权限；若用系统 utun 自建模型，App 需相应授权。
-- 移动端（Android/iOS）需实现 `MobileTun`（从系统 fd 构造）并接通 `candy_set_tun_fd`，当前该接口返回 `CANDY_ERR_UNIMPLEMENTED`。
-- Windows/Linux 桌面：绑定层已按 `candy_ffi.dll` / `libcandy_ffi.so` 命名预留，编出对应动态库即可复用同一套 Dart 代码。
+- 桌面三端零付费账号、零签名：本机免签直跑，分发靠右键打开 / Gatekeeper “仍要打开”。
+- **Windows / Linux**：新架构的提权安装（Windows UAC/服务、Linux pkexec/setcap）与平台
+  工程尚未实现，CI 里旧的 FFI 版本 job 已移除。待其提权方案设计验证后再补。
+- **iOS**：必须走 NetworkExtension，需付费开发者账号，暂不在本客户端范围内。
