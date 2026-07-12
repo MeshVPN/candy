@@ -98,3 +98,21 @@ endif()
 add_subdirectory(candy)
 add_subdirectory(candy-cli)
 add_subdirectory(candy-service)
+
+# C ABI 动态库：供 Flutter/dart:ffi 及移动端 FFI 加载（默认关闭，桌面/客户端 SDK 打开）。
+# 直接编译 capi.cc 并链接静态核心库，保证 candy_* 导出符号一定进入动态库符号表。
+option(CANDY_SHARED "Build the C ABI shared library (libcandy_ffi) for FFI bindings" OFF)
+if (${CANDY_SHARED})
+    add_library(candy_shared SHARED candy/src/candy/capi.cc)
+    target_compile_definitions(candy_shared PRIVATE CANDY_BUILD_DLL)
+    # capi.cc 经 client.h 间接包含 Poco/JSON 头，而 Poco 是核心库的 PRIVATE 依赖不会
+    # 传递，故显式补 Foundation+JSON 的 include；核心逻辑仍由 Candy::Library 提供。
+    target_link_libraries(candy_shared PRIVATE Candy::Library Poco::Foundation Poco::JSON)
+    set_target_properties(candy_shared PROPERTIES OUTPUT_NAME "candy_ffi")
+    # 链入动态库的静态库都必须是位置无关代码。macOS 默认即 PIC 可容错，但 Linux
+    # （尤其 aarch64）会因 lwIP 非 PIC 而报 relocation 错误，故显式对相关静态库开启。
+    set_property(TARGET candy-library PROPERTY POSITION_INDEPENDENT_CODE ON)
+    if (TARGET lwip)
+        set_property(TARGET lwip PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
+endif()

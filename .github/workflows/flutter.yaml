@@ -1,0 +1,205 @@
+name: flutter
+
+# 跨平台 UI 客户端发布：一套 Dart 代码 × 三个原生 runner。
+# 每个 runner 各自：① 编 candy_ffi 动态库（CMake）② flutter create 补平台样板
+# ③ flutter build 出各平台产物 ④ 把动态库塞进 App 可加载路径 ⑤ 打包上传。
+# push 到 master 做冒烟构建；release published 时把产物挂到 Release。
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'clients/flutter/**'
+      - 'candy/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/flutter.yaml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  FLUTTER_DIR: clients/flutter
+
+jobs:
+  # ------------------------------- macOS -------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: depends
+        run: brew update && brew install fmt poco spdlog ninja
+      - name: setup flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: build candy_ffi (dylib)
+        run: |
+          if [ "$RUNNER_ARCH" == "ARM64" ]; then
+            export CPATH=/opt/homebrew/include
+            export LIBRARY_PATH=/opt/homebrew/lib
+          else
+            export CPATH=/usr/local/include
+            export LIBRARY_PATH=/usr/local/lib
+          fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCANDY_SHARED=ON -DCANDY_NETSTACK=ON
+          cmake --build build --target candy_shared
+      - name: flutter build macos
+        working-directory: ${{ env.FLUTTER_DIR }}
+        run: |
+          flutter create --platforms=macos --project-name candy .
+          flutter pub get
+          flutter build macos --release
+      - name: bundle dylib into app
+        working-directory: ${{ env.FLUTTER_DIR }}
+        run: |
+          APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)
+          echo "app bundle: $APP"
+          mkdir -p "$APP/Contents/Frameworks"
+          cp "$GITHUB_WORKSPACE/build/libcandy_ffi.dylib" "$APP/Contents/Frameworks/"
+          # 打成 zip 便于上传（保留 .app 目录结构与可执行权限）。
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          ditto -c -k --keepParent "$APP" "$GITHUB_WORKSPACE/artifact/candy-macos.zip"
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: candy-ui-macos-${{ github.event.release.tag_name || github.sha }}
+          path: artifact/candy-macos.zip
+      - name: set release package name
+        if: github.event_name == 'release'
+        run: |
+          GIT_TAG=${{ github.event.release.tag_name }}
+          echo "PKG=candy-ui_${GIT_TAG#v}+macos.zip" >> $GITHUB_ENV
+      - name: rename for release
+        if: github.event_name == 'release'
+        run: mv artifact/candy-macos.zip "artifact/${{ env.PKG }}"
+      - name: upload release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'release'
+        with:
+          files: artifact/${{ env.PKG }}
+
+  # ------------------------------- Windows -------------------------------
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: setup msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-spdlog
+            mingw-w64-x86_64-poco
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: build candy_ffi (dll)
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCANDY_SHARED=ON -DCANDY_NETSTACK=ON
+          cmake --build build --target candy_shared
+      - name: flutter build windows
+        shell: pwsh
+        working-directory: ${{ env.FLUTTER_DIR }}
+        run: |
+          flutter create --platforms=windows --project-name candy .
+          flutter pub get
+          flutter build windows --release
+      - name: bundle dll and deps
+        shell: msys2 {0}
+        run: |
+          OUT=$(find "$FLUTTER_DIR/build/windows" -type d -name Release | grep -i runner | head -n1)
+          echo "runner release dir: $OUT"
+          cp build/candy_ffi.dll "$OUT/"
+          # MinGW 运行库随 dll 一起分发，避免目标机缺 libgcc/libstdc++/winpthread。
+          scripts/search-deps.sh "$OUT/candy_ffi.dll" "$OUT" || true
+          mkdir -p artifact
+          cp -r "$OUT" artifact/candy-windows
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: candy-ui-windows-${{ github.event.release.tag_name || github.sha }}
+          path: artifact/candy-windows
+      - name: set release package name
+        shell: bash
+        if: github.event_name == 'release'
+        run: |
+          GIT_TAG=${{ github.event.release.tag_name }}
+          echo "PKG=candy-ui_${GIT_TAG#v}+windows_amd64" >> $GITHUB_ENV
+      - name: zip release
+        uses: thedoctor0/zip-release@0.7.5
+        if: github.event_name == 'release'
+        with:
+          type: 'zip'
+          filename: ${{ env.PKG }}.zip
+          directory: artifact/candy-windows
+      - name: upload release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'release'
+        with:
+          files: artifact/candy-windows/${{ env.PKG }}.zip
+
+  # ------------------------------- Linux -------------------------------
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake pkg-config \
+            libpoco-dev libssl-dev \
+            clang libgtk-3-dev liblzma-dev
+      - name: setup flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: build candy_ffi (so)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCANDY_SHARED=ON -DCANDY_NETSTACK=ON
+          cmake --build build --target candy_shared
+      - name: flutter build linux
+        working-directory: ${{ env.FLUTTER_DIR }}
+        run: |
+          flutter create --platforms=linux --project-name candy .
+          flutter pub get
+          flutter build linux --release
+      - name: bundle so into bundle
+        working-directory: ${{ env.FLUTTER_DIR }}
+        run: |
+          OUT=$(find build/linux -type d -name bundle | head -n1)
+          echo "bundle dir: $OUT"
+          mkdir -p "$OUT/lib"
+          cp "$GITHUB_WORKSPACE/build/libcandy_ffi.so" "$OUT/lib/"
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          cp -r "$OUT" "$GITHUB_WORKSPACE/artifact/candy-linux"
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: candy-ui-linux-${{ github.event.release.tag_name || github.sha }}
+          path: artifact/candy-linux
+      - name: set release package name
+        if: github.event_name == 'release'
+        run: |
+          GIT_TAG=${{ github.event.release.tag_name }}
+          echo "PKG=candy-ui_${GIT_TAG#v}+linux_amd64" >> $GITHUB_ENV
+      - name: tar release
+        if: github.event_name == 'release'
+        run: tar -C artifact -czf "artifact/${{ env.PKG }}.tar.gz" candy-linux
+      - name: upload release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'release'
+        with:
+          files: artifact/${{ env.PKG }}.tar.gz
