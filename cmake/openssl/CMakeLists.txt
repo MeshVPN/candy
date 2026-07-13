@@ -12,7 +12,8 @@ ExternalProject_Add(
     LOG_BUILD                   ON
     BUILD_IN_SOURCE             YES
     CONFIGURE_COMMAND 
-        COMMAND sed -i "s/disable('static', 'pic', 'threads')/disable('static', 'pic')/" Configure
+        # 用 -i.bak 形式兼容 GNU sed 与 macOS 的 BSD sed（后者要求 -i 带后缀参数）。
+        COMMAND sed -i.bak "s/disable('static', 'pic', 'threads')/disable('static', 'pic')/" Configure
         COMMAND ./config --release no-unit-test no-shared ${TARGET_OPENSSL} CFLAGS=$ENV{CFLAGS} LDFLAGS=$ENV{LDFLAGS}
     BUILD_COMMAND               ""
     INSTALL_COMMAND             ""

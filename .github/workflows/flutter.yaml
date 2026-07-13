@@ -2,10 +2,15 @@ name: flutter
 
 # UI 客户端发布（当前仅 macOS）。
 # 架构：Flutter GUI(普通用户) --HTTP--> candy-service(特权 daemon) --> candy 核心建 utun。
-# runner 流程：① 编 candy-service 二进制（CMake）② flutter build macos 出产物
-# ③ 把 candy-service 塞进 App 资源目录并内嵌依赖 ④ 打成 DMG 上传。
+# runner 流程：① 静态编 candy-service 二进制（CMake -DCANDY_STATIC=1）② flutter build
+# macos 出产物 ③ 把 candy-service 塞进 App 资源目录 ④ 打成 DMG 上传。
 # App 内首次连接时用 osascript 提权把 candy-service 装成 LaunchDaemon 常驻。
 # push 到 master/api 做冒烟构建；release published 时把产物挂到 Release。
+#
+# 为什么静态链接：CI runner 系统版本高于用户机器时，动态链接的 Homebrew 依赖
+# （尤其 openssl）会带上过高的 minos，产物在旧系统被直接 SIGKILL（启动失败）。
+# CANDY_STATIC 从源码静态编 OpenSSL+Poco 进二进制，并用 min-version=11.0 统一下限，
+# 产物只依赖每台 Mac 都有的系统库（libc++/libSystem），零 Homebrew dylib、零 rpath。
 #
 # 注意：macos/ 平台工程（含定制 entitlements：关沙盒、开出站网）已提交进仓库，
 # CI 不再执行 flutter create，避免覆盖这些定制。
@@ -38,23 +43,26 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
       - name: depends
-        run: brew update && brew install fmt poco spdlog ninja
+        # 静态构建从源码编 OpenSSL+Poco，无需 brew 装它们；仅需 ninja 做生成器。
+        run: brew update && brew install ninja
       - name: setup flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
       - name: build candy-service
         run: |
-          if [ "$RUNNER_ARCH" == "ARM64" ]; then
-            export CPATH=/opt/homebrew/include
-            export LIBRARY_PATH=/opt/homebrew/lib
-          else
-            export CPATH=/usr/local/include
-            export LIBRARY_PATH=/usr/local/lib
-          fi
+          # 静态链接 OpenSSL+Poco，产物自包含；min-version=11.0 兼容旧 macOS。
+          # OpenSSL 的 ./config 靠 CFLAGS/LDFLAGS 注入下限，Poco/核心靠 CMAKE_OSX_
+          # DEPLOYMENT_TARGET；两者都设才能让整个产物 minos 统一为 11.0。
+          export CFLAGS="-mmacosx-version-min=11.0"
+          export LDFLAGS="-mmacosx-version-min=11.0"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCANDY_NETSTACK=ON
+            -DCANDY_STATIC=1 -DTARGET_OPENSSL=darwin64-arm64-cc \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCANDY_NETSTACK=ON
           cmake --build build --target candy-service
+          # 静态产物落在 build/bin/（Poco 子项目重定向了输出目录）。核对其自包含：
+          # 应只依赖 /usr/lib 系统库，无任何 Homebrew dylib。
+          otool -L build/bin/candy-service
       - name: flutter build macos
         working-directory: ${{ env.FLUTTER_DIR }}
         run: |
@@ -66,19 +74,12 @@ jobs:
           APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)
           echo "app bundle: $APP"
           RES="$APP/Contents/Resources"
-          FW="$APP/Contents/Frameworks"
-          mkdir -p "$RES" "$FW"
+          mkdir -p "$RES"
           # candy-service 由 App 提权装成 daemon，二进制随包放 Resources/。
-          cp "$GITHUB_WORKSPACE/build/candy-service/candy-service" "$RES/candy-service"
+          # 静态构建产物自包含（零外部 dylib），无需内嵌 Frameworks 或改写 rpath。
+          cp "$GITHUB_WORKSPACE/build/bin/candy-service" "$RES/candy-service"
           chmod +x "$RES/candy-service"
-          # candy-service 硬链了一串 Homebrew 的 Poco/openssl 绝对路径依赖，目标机没装
-          # Homebrew 会加载失败。把这些依赖递归内嵌进 Frameworks/ 并改写为 @rpath，
-          # 并给 candy-service 补一条指向 Frameworks 的 LC_RPATH，使其自包含。
-          "$GITHUB_WORKSPACE/scripts/bundle-macos-deps.sh" "$RES/candy-service" "$FW"
-          install_name_tool -add_rpath "@executable_path/../Frameworks" "$RES/candy-service" || true
-          # 改依赖会使各库签名失效，直接运行会报“已损坏”。重新 ad-hoc 签名：
-          # 先逐个签内部 dylib 与 candy-service，再整包封印。
-          for dylib in "$FW"/*.dylib; do codesign --force -s - "$dylib"; done
+          # ad-hoc 重新签名：先签 candy-service 再整包封印，避免运行时报“已损坏”。
           codesign --force -s - "$RES/candy-service"
           codesign --force --deep -s - "$APP"
           # 打成 DMG 分发（拖入 Applications 的标准体验，比 zip 更规范）。

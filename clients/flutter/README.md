@@ -32,7 +32,7 @@ clients/flutter/
 
 ## 一、编译 candy-service（在仓库根 `candy/`）
 
-daemon 就是核心自带的 `candy-service` 可执行文件，默认即构建目标：
+daemon 就是核心自带的 `candy-service` 可执行文件。本机开发用普通动态构建即可：
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCANDY_NETSTACK=ON
@@ -41,6 +41,19 @@ cmake --build build --target candy-service
 ```
 
 `CANDY_NETSTACK=ON` 提供 userspace lwIP 栈；桌面 userspace 模式必需。
+
+> **发布务必用静态构建**（见第四节）。动态构建的产物硬链了 Homebrew 的 openssl/Poco，
+> 且 minos 跟随构建机系统；在更旧的 macOS 上会因依赖缺失或版本过高被系统直接拒绝启动。
+> 静态构建从源码编 OpenSSL+Poco 进二进制、下限锁 11.0，产物自包含、跨系统可跑：
+>
+> ```bash
+> export CFLAGS="-mmacosx-version-min=11.0"; export LDFLAGS="-mmacosx-version-min=11.0"
+> cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+>   -DCANDY_STATIC=1 -DTARGET_OPENSSL=darwin64-arm64-cc \
+>   -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCANDY_NETSTACK=ON
+> cmake --build build --target candy-service
+> # 产物：build/bin/candy-service（otool -L 应只剩 /usr/lib 系统库）
+> ```
 
 ## 二、本机开发运行
 
@@ -81,18 +94,18 @@ dart run tool/e2e_connect.dart <ws地址> <密码> [期望地址前缀]
 
 `.github/workflows/flutter.yaml` 的 macOS job：
 
-1. `brew install` 依赖，CMake 编 `candy-service`；
-2. `flutter build macos --release` 出 `.app`（用仓库里已提交的 `macos/` 工程与 entitlements，
+1. `brew install ninja`，**静态**编 `candy-service`（`-DCANDY_STATIC=1` +
+   `-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0` + `CFLAGS/LDFLAGS=-mmacosx-version-min=11.0`），
+   从源码把 OpenSSL+Poco 静态链进二进制，产物只依赖系统库、下限锁 11.0；
+2. `flutter build macos --release` 出 `.app`（用仓库里已提交的 `macos/` 工程与 entitlements,
    **不** `flutter create`）；
-3. 把 `candy-service` 塞进 `<App>.app/Contents/Resources/`，用 `scripts/bundle-macos-deps.sh`
-   递归内嵌它的 Homebrew 依赖到 `Contents/Frameworks/` 并改写为 `@rpath`，补一条
-   `@executable_path/../Frameworks` 的 LC_RPATH，使其脱离 Homebrew 自包含；
-4. 逐个 dylib + candy-service + 整包 ad-hoc 重签名（改依赖会使原签名失效）；
-5. `hdiutil` 打成 DMG 上传。`release published` 时把产物挂到 Release。
+3. 把 `build/bin/candy-service` 塞进 `<App>.app/Contents/Resources/`。静态产物自包含，
+   **无需**内嵌任何 Frameworks/dylib，也无需改写 rpath；
+4. candy-service + 整包 ad-hoc 重签名，`hdiutil` 打成 DMG 上传。`release published` 时挂到 Release。
 
 安装器 `daemon_installer.dart` 的 `locateBundledBinary()` 打包期会从
 `<App>.app/Contents/Resources/candy-service` 找到随包二进制，提权拷到
-`/Library/Application Support/Candy/` 并注册 LaunchDaemon。
+`/Library/Application Support/Candy/` 并注册 LaunchDaemon（单文件拷贝，无依赖搬运）。
 
 > **打开 DMG 里的 app 提示“已损坏，无法打开”**：因未做 Apple 公证（无开发者账号），
 > 经浏览器下载的 app 会被打上隔离属性（`com.apple.quarantine`），Gatekeeper 误报“已损坏”。

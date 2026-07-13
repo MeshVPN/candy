@@ -34,6 +34,7 @@ class DaemonPaths {
 
 class DaemonInstaller {
   /// 定位随 App 分发的 candy-service 源二进制。
+  /// candy-service 为静态构建，自包含全部依赖，无需随附任何 dylib。
   /// - 打包后：<App>.app/Contents/Resources/candy-service
   /// - 开发期：允许通过环境变量 CANDY_SERVICE_BIN 指定 build 产物绝对路径。
   static String? locateBundledBinary() {
@@ -127,6 +128,7 @@ rm -rf '${DaemonPaths.installDir}'
     required String srcBinary,
     required String tmpPlist,
   }) {
+    // candy-service 为静态自包含二进制，只需拷贝单个文件，无需搬运任何依赖库。
     return '''
 mkdir -p '${DaemonPaths.installDir}'
 mkdir -p '${DaemonPaths.logDir}'
