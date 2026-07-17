@@ -38,6 +38,7 @@ Poco::JSON::Object arguments::json() {
         config.set("vmac", virtualMac(this->name));
         config.set("expt", loadTunAddress(this->name));
         config.set("userspace-stack", this->userspaceStack);
+        config.set("udp-port-convergence", this->udpPortConvergence);
     }
 
     if (this->mode == "server") {
@@ -131,6 +132,12 @@ int arguments::parse(int argc, char *argv[]) {
               "instead of the kernel stack. Default is false (kernel). (client only)")
         .implicit_value(true);
 
+    program.add_argument("--udp-port-convergence")
+        .help("converge all inner UDP sources onto a single landing socket/port (single-port mode)\n"
+              "instead of one socket per source. Requires --userspace-stack.\n"
+              "Default is false (per-source full-cone). (client only)")
+        .implicit_value(true);
+
     program.add_group("Server options");
 
     program.add_argument("-d", "--dhcp")
@@ -189,6 +196,7 @@ int arguments::parse(int argc, char *argv[]) {
         program.set_if_used("--discovery", this->discovery);
         program.set_if_used("--route", this->routeCost);
         program.set_if_used("--userspace-stack", this->userspaceStack);
+        program.set_if_used("--udp-port-convergence", this->udpPortConvergence);
 
         bool needShowUsage = [&]() {
             if (this->mode != "client" && this->mode != "server")
@@ -247,6 +255,7 @@ void arguments::parseFile(std::string cfgFile) {
             {"mtu", [&](const std::string &value) { this->mtu = std::stoi(value); }},
             {"localhost", [&](const std::string &value) { this->localhost = value; }},
             {"userspace-stack", [&](const std::string &value) { this->userspaceStack = (value == "true"); }},
+            {"udp-port-convergence", [&](const std::string &value) { this->udpPortConvergence = (value == "true"); }},
         };
         auto trim = [](std::string str) {
             if (str.length() >= 2 && str.front() == '\"' && str.back() == '\"') {

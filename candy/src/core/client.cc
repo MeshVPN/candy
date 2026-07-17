@@ -70,6 +70,10 @@ bool Client::getUserspaceStack() const {
     return this->userspaceStack;
 }
 
+bool Client::getUdpPortConvergence() const {
+    return this->udpPortConvergence;
+}
+
 int Client::getMtu() const {
     return this->tun.getMTU();
 }
@@ -121,6 +125,10 @@ void Client::setMtu(int mtu) {
 
 void Client::setUserspaceStack(bool enable) {
     this->userspaceStack = enable;
+}
+
+void Client::setUdpPortConvergence(bool enable) {
+    this->udpPortConvergence = enable;
 }
 
 void Client::run() {

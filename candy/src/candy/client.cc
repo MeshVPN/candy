@@ -100,6 +100,7 @@ bool run(const std::string &id, const Poco::JSON::Object &config) {
         client->setPort(config.getValue<int>("port"));
         client->setLocalhost(config.getValue<std::string>("localhost"));
         client->setUserspaceStack(config.optValue<bool>("userspace-stack", false));
+        client->setUdpPortConvergence(config.optValue<bool>("udp-port-convergence", false));
         client->run();
     }
     candy::logger().information(Poco::format("run exit: id=%s ", id));

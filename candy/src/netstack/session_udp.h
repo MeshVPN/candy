@@ -41,7 +41,10 @@ class SessionUdp : public Session, public std::enable_shared_from_this<SessionUd
 public:
     // pcb：lwIP 为该源二元组克隆出的 npcb（NetStack 线程持有，其 local_* 随每个入站包被 lwIP
     //      覆写为当前目的）。origSrc/origSrcPort：源端(dev1)。
-    SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort);
+    // converged：是否单端口收敛模式。false＝每源全锥形（本会话自建 fd、自 recvfrom）；
+    //      true＝所有源共用全局 UdpMux 的单 fd（本会话不建 fd，发送经 UdpMux、回程由 UdpMux
+    //      demux 后回调本会话 replyToLwip）。
+    SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort, bool converged);
     ~SessionUdp() override;
 
     int start() override;
@@ -52,6 +55,11 @@ public:
     // NetStack 线程：把一份来自 lwIP 的数据报连同其目的（per-packet，从 pcb->local_* 读得）
     // 投递到落地 fd，用 sendto 发往该目的。
     void sendToLanding(uint32_t dstIpBe, uint16_t dstPortHost, std::string data);
+
+    // 落地 fd 收到某对端(peerIp:peerPort)回包后，用 pcb 以该对端为源把数据报注入回源端。
+    // 每源模式：本会话 onFdReadable 内经 postToStack 自调；
+    // 收敛模式：UdpMux demux 出本源后经 NetStack::injectUdpReply 调用。均在 NetStack 线程。
+    void replyToLwip(uint32_t peerIpBe, uint16_t peerPortHost, std::string data);
 
     // 该会话的源二元组 key（NetStack 线程的会话表用）。
     const std::string &key() const {
@@ -75,13 +83,14 @@ private:
     // ---- NetStack 线程 ----
     // 本流后续数据报到达：addr/port=源端(dev1)，目的从 pcb->local_* 读取，投递到落地 fd 发送。
     void onPcbRecv(struct pbuf *p, const ip_addr_t *addr, u16_t port);
-    // 落地 fd 收到某对端(peerIp:peerPort)回包后，用 pcb 以该对端为源把数据报注入回源端。
-    void replyToLwip(uint32_t peerIpBe, uint16_t peerPortHost, std::string data);
     void closeFromStack();
 
 private:
     struct udp_pcb *pcb;
     int fd;
+
+    // 单端口收敛模式：true＝不自建 fd，发送经全局 UdpMux、回程由 UdpMux 回调 replyToLwip。
+    bool converged;
 
     IP4 origSrc;
     uint16_t origSrcPort;

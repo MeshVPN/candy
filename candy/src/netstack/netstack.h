@@ -31,6 +31,7 @@ namespace candy {
 class Client;
 class SessionTcp;
 class SessionUdp;
+class UdpMux;
 
 // NetStack：独占 lwIP（NO_SYS=1 单线程 raw API）的模块。
 // 持有一个 NetStack 线程驱动 lwIP 收发与定时器，一个 Reactor 线程管理落地 fd。
@@ -61,6 +62,14 @@ public:
     void removeSession(struct tcp_pcb *pcb);
     // UDP 会话结束时从 UDP 会话表移除（按源二元组 key）。仅 NetStack 线程调用。
     void removeUdpSession(const std::string &key);
+
+    // ---- UDP 单端口收敛（converged 模式）协作接口，均仅 NetStack 线程调用 ----
+    // 某内部源 innerSrc 发往 (dstIpBe:dstPortHost) 的一份报文，转交全局 UdpMux 发送。
+    void sendUdpConverged(const std::string &innerSrc, uint32_t dstIpBe, uint16_t dstPortHost, std::string data);
+    // 某内部源整体消亡，通知 UdpMux 级联清掉该源名下全部 endpointOwner 条目。
+    void onUdpSourceGone(const std::string &innerSrc);
+    // UdpMux demux 出内部源后，把回包定位到对应 SessionUdp 注入回 lwIP。
+    void injectUdpReply(const std::string &innerSrc, uint32_t rIpBe, uint16_t rPortHost, std::string data);
 
     Client *getClient();
 
@@ -123,6 +132,10 @@ private:
     std::unordered_map<struct tcp_pcb *, std::shared_ptr<SessionTcp>> sessions;
     // UDP 会话表：源二元组 key -> SessionUdp。仅 NetStack 线程访问，无需加锁。
     std::unordered_map<std::string, std::shared_ptr<SessionUdp>> udpSessions;
+
+    // UDP 单端口收敛多路复用器：仅在 udpPortConvergence 开启时创建（惰性首用即建），
+    // 收敛模式下所有内部源共用它的单一落地 fd。仅 NetStack 线程访问。
+    std::shared_ptr<UdpMux> udpMux;
 };
 
 } // namespace candy

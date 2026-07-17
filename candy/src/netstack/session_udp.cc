@@ -18,10 +18,10 @@
 
 namespace candy {
 
-SessionUdp::SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort)
-    : Session(stack), pcb(pcb), fd(-1), origSrc(origSrc), origSrcPort(origSrcPort),
+SessionUdp::SessionUdp(NetStack *stack, struct udp_pcb *pcb, IP4 origSrc, uint16_t origSrcPort, bool converged)
+    : Session(stack), pcb(pcb), fd(-1), converged(converged), origSrc(origSrc), origSrcPort(origSrcPort),
       lastActiveTs(std::chrono::steady_clock::now()) {
-    // 源二元组 key：源IP:源端口（全锥形下一源一会话，目的 per-packet 不入 key）
+    // 源二元组 key：源IP:源端口（一源一会话，目的 per-packet 不入 key）
     this->sessionKey.assign((const char *)&origSrc, sizeof(uint32_t));
     this->sessionKey.append((const char *)&origSrcPort, sizeof(origSrcPort));
 }
@@ -37,8 +37,16 @@ int SessionUdp::start() {
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32) || defined(_WIN64)
     this->self = shared_from_this();
 
-    // 落地拨号：内核 socket 直连（DirectOutbound）。全锥形——unconnected + 固定出口端口，
-    // 后续用 sendto 发往任意目的、recvfrom 收任意对端回包。出口源 IP 由内核填为网关出口 IP。
+    if (this->converged) {
+        // 单端口收敛模式：不自建 fd。发送经全局 UdpMux 的单 fd、回程由 UdpMux demux 后回调
+        // replyToLwip。本会话只保留 npcb（作 innerNpcb 定位表项），注册每流 recv 即可。
+        candy::logger().debug(
+            Poco::format("session udp (converged) src: %s:%hu", this->origSrc.toString(), this->origSrcPort));
+        udp_recv(this->pcb, recvTrampoline, this);
+        return 0;
+    }
+
+    // 每源全锥形模式：本会话自建 unconnected + 固定出口端口的落地 fd，自 recvfrom 收回包。
     Outbound &outbound = this->stack->getOutbound();
     this->fd = outbound.dialUdp();
     if (this->fd < 0) {
@@ -80,6 +88,13 @@ void SessionUdp::onPcbRecv(struct pbuf *p, const ip_addr_t *addr, u16_t port) {
     data.resize(p->tot_len);
     pbuf_copy_partial(p, data.data(), p->tot_len, 0);
     pbuf_free(p);
+    this->lastActiveTs = std::chrono::steady_clock::now();
+    if (this->converged) {
+        // 收敛模式：发送经全局 UdpMux（内部做 STUN 识别/txid 登记/数据面 FCFS 锁，通过后 post
+        // 到 Reactor 用全局 fd 发送）。表操作全在 NetStack 线程完成，符合 §11.3a 线程归属。
+        this->stack->sendUdpConverged(this->sessionKey, dstIpBe, dstPortHost, std::move(data));
+        return;
+    }
     sendToLanding(dstIpBe, dstPortHost, std::move(data));
 }
 
@@ -143,6 +158,10 @@ void SessionUdp::closeFromStack() {
     }
     NetStack *stack = this->stack;
     std::string k = this->sessionKey;
+    // 收敛模式：本源整体消亡，通知 UdpMux 级联清掉该源名下全部 endpointOwner 条目（§11.3 兜底）。
+    if (this->converged) {
+        stack->onUdpSourceGone(k);
+    }
     auto holder = shared_from_this();
     stack->getReactor().post([holder] { holder->closeFromReactor(); });
     stack->removeUdpSession(k);
@@ -155,6 +174,7 @@ void SessionUdp::shutdownFromStack() {
         udp_remove(this->pcb);
         this->pcb = nullptr;
     }
+    // 收敛模式：整栈拆除时 UdpMux 会被 NetStack 统一 shutdown 清表，故此处无需逐源级联。
     if (!this->closing.exchange(true)) {
         auto holder = shared_from_this();
         this->stack->getReactor().post([holder] {

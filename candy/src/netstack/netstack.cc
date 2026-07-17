@@ -4,6 +4,7 @@
 #include "core/message.h"
 #include "netstack/session_tcp.h"
 #include "netstack/session_udp.h"
+#include "netstack/udpmux.h"
 #include "utils/log.h"
 #include <Poco/Format.h>
 #include <chrono>
@@ -228,6 +229,11 @@ void NetStack::teardownStack() {
         }
     }
     this->udpSessions.clear();
+    // 单端口收敛：整栈拆除时统一 shutdown UdpMux（清四表 + 交 reactor 关全局 fd）。
+    if (this->udpMux) {
+        this->udpMux->shutdown();
+        this->udpMux.reset();
+    }
     {
         std::unique_lock lock(this->peerMapMutex);
         this->vnetPeerMap.clear();
@@ -267,6 +273,10 @@ void NetStack::loop() {
         auto now = std::chrono::steady_clock::now();
         if (now - lastReap >= std::chrono::seconds(10)) {
             reapIdleUdpSessions();
+            // 收敛模式：同频老化 UdpMux 的 endpointOwner / stunTxn。
+            if (this->udpMux) {
+                this->udpMux->reap();
+            }
             lastReap = now;
         }
     }
@@ -479,7 +489,23 @@ void NetStack::onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *a
     candy::logger().debug(Poco::format("netstack onUdpRecv src %s:%hu (first dst %s:%hu)", origSrc.toString(), origSrcPort,
                                        origDst.toString(), origDstPort));
 
-    auto session = std::make_shared<SessionUdp>(this, pcb, origSrc, origSrcPort);
+    // 模式选择：读客户端开关。收敛模式下所有源共用全局 UdpMux（惰性首用即建）。
+    bool converged = this->client && this->client->getUdpPortConvergence();
+    if (converged && !this->udpMux) {
+        this->udpMux = std::make_shared<UdpMux>(this);
+        if (this->udpMux->start()) {
+            // 配置明确选择收敛模式时，不得静默回退到每源模式：否则出口语义与用户选择不一致。
+            candy::logger().error("netstack udpmux start failed while UDP convergence is enabled");
+            this->udpMux.reset();
+            udp_recv(pcb, nullptr, nullptr);
+            udp_remove(pcb);
+            pbuf_free(p);
+            this->client->shutdown();
+            return;
+        }
+    }
+
+    auto session = std::make_shared<SessionUdp>(this, pcb, origSrc, origSrcPort, converged);
     if (session->start()) {
         udp_recv(pcb, nullptr, nullptr);
         udp_remove(pcb);
@@ -488,6 +514,32 @@ void NetStack::onUdpRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *a
     }
     this->udpSessions[session->key()] = session; // key = 源二元组
     // 不释放 p：交还 lwIP（goto again 重投到该 npcb 的每流 handler）。
+}
+
+// ===================== UDP 单端口收敛协作接口（仅 NetStack 线程） =====================
+
+void NetStack::sendUdpConverged(const std::string &innerSrc, uint32_t dstIpBe, uint16_t dstPortHost, std::string data) {
+    if (!this->udpMux) {
+        return;
+    }
+    this->udpMux->sendFromSource(innerSrc, dstIpBe, dstPortHost, std::move(data));
+}
+
+void NetStack::onUdpSourceGone(const std::string &innerSrc) {
+    if (!this->udpMux) {
+        return;
+    }
+    this->udpMux->onSourceGone(innerSrc);
+}
+
+void NetStack::injectUdpReply(const std::string &innerSrc, uint32_t rIpBe, uint16_t rPortHost, std::string data) {
+    // innerNpcb 复用 udpSessions：按内部源定位对应 SessionUdp，以实际对端为源注入回 lwIP。
+    // 源可能已老化消亡（会话被回收），此时静默丢弃即可。
+    auto it = this->udpSessions.find(innerSrc);
+    if (it == this->udpSessions.end() || !it->second) {
+        return;
+    }
+    it->second->replyToLwip(rIpBe, rPortHost, std::move(data));
 }
 
 } // namespace candy

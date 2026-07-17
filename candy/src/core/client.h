@@ -46,6 +46,7 @@ public:
     void setVirtualMac(const std::string &vmac);
 
     void setUserspaceStack(bool enable);
+    void setUdpPortConvergence(bool enable);
 
     void run();
     bool isRunning();
@@ -65,6 +66,7 @@ public:
     MsgQueue &getNetStackMsgQueue();
 
     bool getUserspaceStack() const;
+    bool getUdpPortConvergence() const;
     int getMtu() const;
 
 private:
@@ -80,6 +82,8 @@ private:
 private:
     std::string tunName;
     bool userspaceStack = false;
+    // UDP 单端口收敛开关（默认关闭＝每源全锥形）。仅在 userspaceStack=true 时生效。
+    bool udpPortConvergence = false;
 };
 
 } // namespace candy

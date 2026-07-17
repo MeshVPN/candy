@@ -114,6 +114,16 @@ inline int netBindAny(int fd) {
 #endif
 }
 
+// 调大接收缓冲区（SO_RCVBUF）。单端口收敛时单个 fd 要收全部对端回包，
+// 突发海量流可能溢出默认缓冲导致丢包（原多 socket 天然分摊，无此问题）。成功返回 0。
+inline int netSetRecvBuf(int fd, int bytes) {
+#if defined(_WIN32) || defined(_WIN64)
+    return ::setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bytes, sizeof(bytes)) == 0 ? 0 : -1;
+#else
+    return ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes)) == 0 ? 0 : -1;
+#endif
+}
+
 // 取本线程最近一次 socket 错误码。
 inline int netLastError() {
 #if defined(_WIN32) || defined(_WIN64)
