@@ -31,6 +31,7 @@ private:
     int discovery = 0;
     int routeCost = 0;
     int mtu = 1400;
+    // userspace-stack：内嵌 lwIP 落地（默认关闭＝继续走内核 tun）。
     bool userspaceStack = false;
     // UDP 单端口收敛：多个内部源共用一个出口 fd/端口（默认关闭＝保留每源全锥形）。
     bool udpPortConvergence = false;
