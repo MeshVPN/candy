@@ -12,6 +12,7 @@
 #include <Poco/Net/ServerSocket.h>
 #include <Poco/Net/StreamSocket.h>
 #include <Poco/URI.h>
+#include <chrono>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -95,6 +96,8 @@ private:
     int sendPacket(IP4 dst, const Msg &msg);
     int sendPacketDirect(IP4 dst, const Msg &msg);
     int sendPacketRelay(IP4 dst, const Msg &msg);
+    IP4 resolvePeerTarget(IP4 dst);
+    void warnP2POnlyDrop(IP4 peer);
 
     Address tunAddr;
 
@@ -146,6 +149,8 @@ private:
 
     int discoveryInterval = 0;
     int routeCost = 0;
+    uint64_t p2pOnlyDropCount = 0;
+    std::chrono::steady_clock::time_point lastP2POnlyDropWarn;
 
     Client &getClient();
     Client *client;

@@ -248,6 +248,10 @@ void WebSocketClient::handleForwardMsg(std::string buffer) {
     IP4Header *header = (IP4Header *)buffer.data();
     // 每次通过服务端转发收到报文都触发一次尝试 P2P 连接, 用于暗示通过服务端转发是个非常耗时的操作
     this->client->getPeerMsgQueue().write(Msg(MsgKind::TRYP2P, header->saddr.toString()));
+    if (this->client->getP2POnly()) {
+        candy::logger().debug(Poco::format("p2p-only drop websocket forward: peer=%s", header->saddr.toString()));
+        return;
+    }
     // 最后把报文移动到 TUN 模块, 因为有移动操作所以必须在最后执行
     this->client->getTunMsgQueue().write(Msg(MsgKind::PACKET, std::move(buffer)));
 }

@@ -45,6 +45,7 @@ public:
     void setExptTunAddress(const std::string &cidr);
     void setVirtualMac(const std::string &vmac);
 
+    void setP2POnly(bool enable);
     void setUserspaceStack(bool enable);
     void setUdpPortConvergence(bool enable);
 
@@ -65,6 +66,7 @@ public:
     MsgQueue &getWsMsgQueue();
     MsgQueue &getNetStackMsgQueue();
 
+    bool getP2POnly() const;
     bool getUserspaceStack() const;
     bool getUdpPortConvergence() const;
     int getMtu() const;
@@ -81,6 +83,7 @@ private:
 
 private:
     std::string tunName;
+    bool p2pOnly = false;
     bool userspaceStack = false;
     // UDP 单端口收敛开关（默认关闭＝每源全锥形）。仅在 userspaceStack=true 时生效。
     bool udpPortConvergence = false;

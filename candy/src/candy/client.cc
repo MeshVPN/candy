@@ -99,6 +99,7 @@ bool run(const std::string &id, const Poco::JSON::Object &config) {
         client->setRouteCost(config.getValue<int>("route")), client->setMtu(config.getValue<int>("mtu"));
         client->setPort(config.getValue<int>("port"));
         client->setLocalhost(config.getValue<std::string>("localhost"));
+        client->setP2POnly(config.optValue<bool>("p2p-only", false));
         client->setUserspaceStack(config.optValue<bool>("userspace-stack", false));
         client->setUdpPortConvergence(config.optValue<bool>("udp-port-convergence", false));
         client->run();

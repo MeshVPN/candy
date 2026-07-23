@@ -70,6 +70,10 @@ bool Client::getUserspaceStack() const {
     return this->userspaceStack;
 }
 
+bool Client::getP2POnly() const {
+    return this->p2pOnly;
+}
+
 bool Client::getUdpPortConvergence() const {
     return this->udpPortConvergence;
 }
@@ -121,6 +125,10 @@ void Client::setLocalhost(std::string ip) {
 
 void Client::setMtu(int mtu) {
     tun.setMTU(mtu);
+}
+
+void Client::setP2POnly(bool enable) {
+    this->p2pOnly = enable;
 }
 
 void Client::setUserspaceStack(bool enable) {

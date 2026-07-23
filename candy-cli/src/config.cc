@@ -37,6 +37,7 @@ Poco::JSON::Object arguments::json() {
         config.set("port", this->port);
         config.set("vmac", virtualMac(this->name));
         config.set("expt", loadTunAddress(this->name));
+        config.set("p2p-only", this->p2pOnly);
         config.set("userspace-stack", this->userspaceStack);
         config.set("udp-port-convergence", this->udpPortConvergence);
     }
@@ -127,6 +128,12 @@ int arguments::parse(int argc, char *argv[]) {
               "If omitted, auto-detected from the first physical network interface. (client only)")
         .metavar("<ip>");
 
+    program.add_argument("--p2p-only")
+        .help("allow business packets only over direct P2P links.\n"
+              "WebSocket remains available for signaling, but relay forwarding is disabled.\n"
+              "Default is false (fall back to WebSocket relay when P2P is unavailable). (client only)")
+        .implicit_value(true);
+
     program.add_argument("--userspace-stack")
         .help("terminate landing traffic with the built-in userspace network stack (lwIP)\n"
               "instead of the kernel stack. Default is false (kernel). (client only)")
@@ -195,6 +202,7 @@ int arguments::parse(int argc, char *argv[]) {
         program.set_if_used("--mtu", this->mtu);
         program.set_if_used("--discovery", this->discovery);
         program.set_if_used("--route", this->routeCost);
+        program.set_if_used("--p2p-only", this->p2pOnly);
         program.set_if_used("--userspace-stack", this->userspaceStack);
         program.set_if_used("--udp-port-convergence", this->udpPortConvergence);
 
@@ -254,6 +262,7 @@ void arguments::parseFile(std::string cfgFile) {
             {"port", [&](const std::string &value) { this->port = std::stoi(value); }},
             {"mtu", [&](const std::string &value) { this->mtu = std::stoi(value); }},
             {"localhost", [&](const std::string &value) { this->localhost = value; }},
+            {"p2p-only", [&](const std::string &value) { this->p2pOnly = (value == "true"); }},
             {"userspace-stack", [&](const std::string &value) { this->userspaceStack = (value == "true"); }},
             {"udp-port-convergence", [&](const std::string &value) { this->udpPortConvergence = (value == "true"); }},
         };

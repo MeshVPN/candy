@@ -48,8 +48,8 @@ Peer::Peer(const IP4 &addr, PeerManager *peerManager) : peerManager(peerManager)
 
 Peer::~Peer() {}
 
-void Peer::tryConnecct() {
-    if (this->state == PeerState::INIT) {
+void Peer::tryConnecct(bool retryFailed) {
+    if (this->state == PeerState::INIT || (retryFailed && this->state == PeerState::FAILED)) {
         updateState(PeerState::PREPARING);
     }
 }

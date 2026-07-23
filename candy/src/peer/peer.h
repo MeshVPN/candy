@@ -40,7 +40,7 @@ public:
     ~Peer();
 
     void tick();
-    void tryConnecct();
+    void tryConnecct(bool retryFailed = false);
     void handleStunResponse();
     void handlePubInfo(IP4 ip, uint16_t port, bool local = false);
 

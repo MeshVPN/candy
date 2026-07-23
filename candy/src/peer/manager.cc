@@ -57,6 +57,8 @@ int PeerManager::setLocalhost(const std::string &ip) {
 int PeerManager::run(Client *client) {
     this->client = client;
     this->localP2PDisabled = false;
+    this->p2pOnlyDropCount = 0;
+    this->lastP2POnlyDropWarn = {};
 
     if (this->stun.update()) {
         candy::logger().fatal("update stun failed");
@@ -183,6 +185,23 @@ int PeerManager::sendPacketRelay(IP4 dst, const Msg &msg) {
     return sendPacketDirect(dst, msg);
 }
 
+IP4 PeerManager::resolvePeerTarget(IP4 dst) {
+    std::shared_lock rtTableLock(this->rtTableMutex);
+    auto it = this->rtTableMap.find(dst);
+    return it == this->rtTableMap.end() ? dst : it->second.next;
+}
+
+void PeerManager::warnP2POnlyDrop(IP4 peer) {
+    ++this->p2pOnlyDropCount;
+    auto now = std::chrono::steady_clock::now();
+    if (now - this->lastP2POnlyDropWarn < std::chrono::seconds(5)) {
+        return;
+    }
+    this->lastP2POnlyDropWarn = now;
+    candy::logger().warning(Poco::format("p2p-only drop: peer=%s p2p link unavailable total=%s", peer.toString(),
+                                         std::to_string(this->p2pOnlyDropCount)));
+}
+
 int PeerManager::sendPubInfo(CoreMsg::PubInfo info) {
     info.src = getClient().address();
     if (info.local) {
@@ -203,6 +222,12 @@ IP4 PeerManager::getTunIp() {
 int PeerManager::handlePacket(Msg msg) {
     auto header = (IP4Header *)msg.data.data();
     if (!sendPacket(header->daddr, msg)) {
+        return 0;
+    }
+    if (getClient().getP2POnly()) {
+        IP4 peer = resolvePeerTarget(header->daddr);
+        handleTryP2P(Msg(MsgKind::TRYP2P, peer.toString()));
+        warnP2POnlyDrop(peer);
         return 0;
     }
     getClient().getWsMsgQueue().write(std::move(msg));
@@ -232,7 +257,7 @@ int PeerManager::handleTryP2P(Msg msg) {
         std::shared_lock lock(this->ipPeerMutex);
         auto it = this->ipPeerMap.find(src);
         if (it != this->ipPeerMap.end()) {
-            it->second.tryConnecct();
+            it->second.tryConnecct(getClient().getP2POnly());
             return 0;
         }
     }
